@@ -44,6 +44,10 @@ enum AdminAPI {
     static let presetsRefresh  = "\(prefix)/presets/refresh"
 
     static let hfTasks         = "\(prefix)/hf/tasks"
+    /// POST target for both whole-repo and single-variant downloads. The
+    /// optional `variant` subfolder rides in the JSON body
+    /// (`StartHFDownloadRequest`), never in the path or query — so this
+    /// constant stays a plain string with no variant-aware overload.
     static let hfDownload      = "\(prefix)/hf/download"
     static func hfCancel(_ taskId: String) -> String { "\(prefix)/hf/cancel/\(taskId)" }
     static func hfRetry(_ taskId: String) -> String  { "\(prefix)/hf/retry/\(taskId)" }

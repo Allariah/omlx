@@ -198,9 +198,24 @@ final class OMLXClient: ObservableObject {
         try await get(AdminAPI.hfTasks)
     }
 
-    func startHFDownload(repoId: String, hfToken: String = "") async throws -> StartHFDownloadResponse {
-        try await post(AdminAPI.hfDownload, body: StartHFDownloadRequest(
-            repoId: repoId, hfToken: hfToken
+    /// Start a Hugging Face download.
+    ///
+    /// `variant` optionally narrows the download to a single named subfolder
+    /// of the repo (e.g. `oQ4e`); nil or blank fetches the whole repo, which
+    /// is the pre-variant behavior. Normalized here rather than at the call
+    /// site so every caller — form submit, suggested grid, model card —
+    /// agrees on what "no variant" means and the field is dropped from the
+    /// JSON body instead of being sent as `""`.
+    func startHFDownload(
+        repoId: String,
+        variant: String? = nil,
+        hfToken: String = ""
+    ) async throws -> StartHFDownloadResponse {
+        let trimmed = variant?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return try await post(AdminAPI.hfDownload, body: StartHFDownloadRequest(
+            repoId: repoId,
+            hfToken: hfToken,
+            variant: (trimmed?.isEmpty ?? true) ? nil : trimmed
         ))
     }
 
