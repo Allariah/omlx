@@ -6680,6 +6680,78 @@
         }
       }
     },
+    "downloads.variant.badge.help" : {
+      "comment" : "Tooltip on the chip marking a download restricted to a single repo subfolder",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Only this subfolder of the repo was requested"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Запрошена только эта подпапка репозитория"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仅请求了仓库中的该子文件夹"
+          }
+        }
+      }
+    },
+    "downloads.variant.label" : {
+      "comment" : "Inline label preceding the optional variant subfolder input on the Hugging Face download form",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Variant:"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Вариант:"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "变体："
+          }
+        }
+      }
+    },
+    "downloads.variant.placeholder" : {
+      "comment" : "Placeholder for the optional variant subfolder input on the Hugging Face download form",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "e.g. oQ4e — leave blank for the whole repo"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "напр. oQ4e — оставьте пустым, чтобы скачать весь репозиторий"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "例如 oQ4e — 留空则下载整个仓库"
+          }
+        }
+      }
+    },
     "enable_thinking" : {
       "localizations" : {
         "ru" : {

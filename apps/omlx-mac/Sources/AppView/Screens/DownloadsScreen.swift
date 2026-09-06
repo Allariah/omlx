@@ -8,6 +8,12 @@
 // source swaps the form + mirror editor; the task list, recent tasks, and
 // suggested-models sections rebind to whichever source is active (their
 // underlying DTOs are identical — see MSTaskDTO.swift).
+//
+// The HF form additionally carries an optional "Variant" input — one named
+// subfolder inside the repo (e.g. `oQ4e`) to fetch instead of the whole
+// thing. It travels as its own `variant` field on the download request, not
+// as a suffix on the repo id, and blank means whole-repo exactly as before.
+// ModelScope has no equivalent, so its form is unchanged.
 
 import SwiftUI
 
@@ -42,6 +48,7 @@ struct DownloadsScreen: View {
             if vm.source == .hf {
                 AddFromHFSection(
                     repoText: $vm.repoText,
+                    variantText: $vm.variantText,
                     isStarting: vm.isStarting,
                     mirrorHost: vm.mirrorHost,
                     mirrorIsCustom: vm.mirrorIsCustom,
@@ -168,6 +175,8 @@ private struct SourceSwitcher: View {
 
 private struct AddFromHFSection: View {
     @Binding var repoText: String
+    /// Optional subfolder within the repo. Blank = whole repo.
+    @Binding var variantText: String
     let isStarting: Bool
     let mirrorHost: String
     let mirrorIsCustom: Bool
@@ -233,6 +242,7 @@ private struct AddFromHFSection: View {
                             onShowCard: onShowCard
                         )
                     }
+                    variantRow
                     if isEditingMirror {
                         mirrorEditor
                     } else {
@@ -240,6 +250,34 @@ private struct AddFromHFSection: View {
                     }
                 }
             }
+        }
+    }
+
+    /// Optional variant (subfolder) input. Sits on its own line under the
+    /// repo field rather than beside it: the search dropdown is anchored
+    /// directly below the repo input, so squeezing a second field into that
+    /// HStack would push the suggestions out of alignment with the box they
+    /// belong to. Borrows the icon + inline-label grammar from
+    /// `mirrorSummary` so the two secondary controls read as one family.
+    private var variantRow: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "folder")
+                .font(.system(size: 11))
+                .foregroundStyle(theme.textTertiary)
+            Text(String(localized: "downloads.variant.label",
+                        defaultValue: "Variant:",
+                        comment: "Inline label preceding the optional variant subfolder input on the Hugging Face download form"))
+                .font(.omlxText(11))
+                .foregroundStyle(theme.textTertiary)
+            TextInput(
+                text: $variantText,
+                placeholder: String(localized: "downloads.variant.placeholder",
+                                    defaultValue: "e.g. oQ4e — leave blank for the whole repo",
+                                    comment: "Placeholder for the optional variant subfolder input on the Hugging Face download form"),
+                mono: true
+            )
+            .frame(maxWidth: .infinity)
+            .onSubmit(onSubmit)
         }
     }
 
@@ -641,6 +679,9 @@ private struct ActiveDownloadsSection: View {
                                     .foregroundStyle(theme.text)
                                     .lineLimit(1)
                                     .truncationMode(.middle)
+                                if let variant = task.variantOrNil {
+                                    VariantBadge(variant: variant)
+                                }
                                 Spacer(minLength: 4)
                                 Text(String(localized: "downloads.progress.bytes",
                                             defaultValue: "\(Int(task.progress))% · \(formatBytes(task.downloadedSize)) of \(formatBytes(task.totalSize))",
@@ -677,6 +718,35 @@ private struct ActiveDownloadsSection: View {
                 }
             }
         }
+    }
+}
+
+/// Compact chip naming the subfolder a task fetched, e.g. `oQ4e`. Rendered
+/// beside the repo id in both the active and recent task lists, because
+/// without it a variant download and a whole-repo download of the same repo
+/// are two visually identical rows. Never rendered for whole-repo tasks, for
+/// tasks reported by a server predating the `variant` field, or for
+/// ModelScope tasks — all three surface as `variantOrNil == nil`.
+///
+/// Styled after the mirror "custom" badge in AddFromHFSection so the two
+/// read as the same kind of annotation, but monospaced to match the repo id
+/// it qualifies.
+private struct VariantBadge: View {
+    let variant: String
+    @Environment(\.omlxTheme) private var theme
+
+    var body: some View {
+        Text(variant)
+            .font(.omlxMono(10, weight: .medium))
+            .foregroundStyle(theme.blueDot)
+            .lineLimit(1)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(theme.blueDot.opacity(0.12))
+            .clipShape(Capsule())
+            .help(String(localized: "downloads.variant.badge.help",
+                         defaultValue: "Only this subfolder of the repo was requested",
+                         comment: "Tooltip on the chip marking a download restricted to a single repo subfolder"))
     }
 }
 
@@ -748,6 +818,9 @@ private struct CompletedTasksSection: View {
                                 .foregroundStyle(theme.text)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
+                            if let variant = task.variantOrNil {
+                                VariantBadge(variant: variant)
+                            }
                             Spacer(minLength: 4)
                             if task.statusEnum == .failed || task.statusEnum == .cancelled {
                                 Button(String(localized: "downloads.button.retry",

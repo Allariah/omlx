@@ -20,6 +20,14 @@ final class DownloadsScreenVM {
     // MARK: - HF state (pre-existing)
 
     var repoText: String = ""
+
+    /// Optional subfolder of the repo to fetch instead of the whole thing
+    /// (e.g. `oQ4e`). Empty — the default — means whole-repo, exactly as
+    /// before this field existed. Bound to the "Variant" input on the HF
+    /// form only; ModelScope has no equivalent, so `msRepoText` has no
+    /// sibling here.
+    var variantText: String = ""
+
     private(set) var tasks: [HFTaskDTO] = []
     private(set) var recommended: [HFModelInfo] = []
 
@@ -372,10 +380,18 @@ final class DownloadsScreenVM {
     /// Starts a download against the active source. `repo` lets the
     /// suggested-models grid pass a repo id without having to first stuff
     /// it into the input box.
-    func startDownload(repo: String? = nil, client: OMLXClient) {
+    ///
+    /// `variant` narrows an HF download to a single subfolder of the repo.
+    /// Callers that pass an explicit `repo` (suggested grid, model-card
+    /// sheet) are always whole-repo picks, so they deliberately do *not*
+    /// inherit whatever is sitting in `variantText` — otherwise a leftover
+    /// variant from an earlier manual submit would silently mangle a
+    /// one-click "Get". Only the manual form (`repo == nil`) reads the field.
+    func startDownload(repo: String? = nil, variant: String? = nil, client: OMLXClient) {
         let target = (repo ?? (source == .hf ? repoText : msRepoText))
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !target.isEmpty else { return }
+        let resolvedVariant = Self.normalizeVariant(variant ?? (repo == nil ? variantText : ""))
         isStarting = true
         let activeSource = source
         Task { [weak self] in
@@ -383,9 +399,14 @@ final class DownloadsScreenVM {
             do {
                 switch activeSource {
                 case .hf:
-                    _ = try await client.startHFDownload(repoId: target)
-                    if repo == nil { self?.repoText = "" }
+                    _ = try await client.startHFDownload(repoId: target, variant: resolvedVariant)
+                    if repo == nil {
+                        self?.repoText = ""
+                        self?.variantText = ""
+                    }
                 case .ms:
+                    // ModelScope has no variant concept — the MS request
+                    // shape (`model_id` / `ms_token`) is unchanged.
                     _ = try await client.startMSDownload(modelId: target)
                     if repo == nil { self?.msRepoText = "" }
                 }
@@ -395,6 +416,18 @@ final class DownloadsScreenVM {
                 self.lastError = error.omlxDescription
             }
         }
+    }
+
+    /// Trim whitespace plus any stray leading/trailing `/` (a common paste
+    /// artifact when a user copies the subfolder out of an HF file listing),
+    /// then collapse the empty result to nil so "blank" reads as whole-repo.
+    /// A slash *inside* the value is left alone for the server to reject —
+    /// silently rewriting it here would hide a genuine typo.
+    private static func normalizeVariant(_ raw: String) -> String? {
+        let trimmed = raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     func cancel(taskId: String, client: OMLXClient) {
