@@ -2,11 +2,13 @@
 """Tests for the HuggingFace model downloader."""
 
 import asyncio
+import io
 import json
 import os
 import shutil
 import threading
 import time
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -22,6 +24,8 @@ from omlx.admin.hf_downloader import (
     _DownloadCancelled,
     _is_xet_transport_error,
     _make_cancellable_tqdm,
+    validate_variant,
+    variant_dir_name,
 )
 
 # =============================================================================
@@ -3101,3 +3105,343 @@ class TestResolveEndpoint:
         assert r1 == r2 == "https://huggingface.co"
         # Second call was a cache hit — head() count unchanged from first probe.
         assert mock_client.head.call_count == 2
+
+
+# =============================================================================
+# Variant (repo subfolder) downloads
+# =============================================================================
+#
+# Some repos bundle many quantized builds of the same model as subfolders
+# (repo/oQ4e/, repo/oQ6e/, ...). `snapshot_download` has no `subfolder`
+# parameter, so a single-variant fetch is expressed as
+# allow_patterns=["{variant}/*"], and the extra directory level that leaves
+# behind is flattened away afterwards. The end state on disk is
+# {owner}/{repo}--{variant}/ holding the variant's files at its root, which
+# is structurally identical to a plain {owner}/{repo} download — that is what
+# keeps discovery, settings keys, deletion and the engine pool working
+# unchanged.
+
+
+class TestVariantDirName:
+    """Target directory naming for variant downloads."""
+
+    def test_no_variant_keeps_repo_layout(self):
+        assert variant_dir_name("owner/model", None) == "owner/model"
+
+    def test_empty_variant_keeps_repo_layout(self):
+        assert variant_dir_name("owner/model", "") == "owner/model"
+
+    def test_variant_appends_suffix(self):
+        assert variant_dir_name("owner/model", "oQ4e") == "owner/model--oQ4e"
+
+
+class TestValidateVariant:
+    """Variant normalization — it is concatenated into a filesystem path."""
+
+    def test_none_and_blank_mean_whole_repo(self):
+        assert validate_variant(None) is None
+        assert validate_variant("") is None
+        assert validate_variant("   ") is None
+
+    def test_whitespace_is_stripped(self):
+        assert validate_variant("  oQ4e  ") == "oQ4e"
+
+    def test_plain_segment_accepted(self):
+        assert validate_variant("oQ4e") == "oQ4e"
+
+    @pytest.mark.parametrize(
+        "variant",
+        ["a/b", "../escape", "..", ".", "sub\\dir", "/abs"],
+    )
+    def test_separators_and_dot_segments_rejected(self, variant):
+        with pytest.raises(ValueError, match="Invalid variant"):
+            validate_variant(variant)
+
+
+class TestVariantDownload:
+    """End-to-end behavior of a variant download through HFDownloader."""
+
+    @pytest.fixture
+    def model_dir(self, tmp_path):
+        d = tmp_path / "models"
+        d.mkdir()
+        return d
+
+    @staticmethod
+    def _mock_api(mock_api_cls):
+        mock_api = MagicMock()
+        mock_info = MagicMock()
+        mock_info.siblings = []
+        mock_api.model_info.return_value = mock_info
+        mock_api_cls.return_value = mock_api
+        return mock_api
+
+    @staticmethod
+    def _fake_snapshot(variant: str):
+        """snapshot_download double that writes the repo's own layout.
+
+        With allow_patterns=["{variant}/*"] the hub reproduces the repo path
+        inside local_dir, so files land at {local_dir}/{variant}/...
+        """
+
+        def _download(**kwargs):
+            if kwargs.get("dry_run"):
+                return []
+            root = Path(kwargs["local_dir"]) / variant
+            (root / "nested").mkdir(parents=True, exist_ok=True)
+            (root / "config.json").write_text("{}")
+            (root / "model.safetensors").write_bytes(b"w" * 64)
+            (root / "nested" / "extra.json").write_text("{}")
+            return str(kwargs["local_dir"])
+
+        return _download
+
+    # --- allow_patterns / target dir ---
+
+    @pytest.mark.asyncio
+    async def test_variant_sets_allow_patterns_and_target_dir(self, model_dir):
+        with patch(
+            "omlx.admin.hf_downloader.HfApi"
+        ) as mock_api_cls, patch(
+            "omlx.admin.hf_downloader.snapshot_download"
+        ) as mock_download:
+            self._mock_api(mock_api_cls)
+            mock_download.side_effect = self._fake_snapshot("oQ4e")
+
+            downloader = HFDownloader(model_dir=str(model_dir))
+            await downloader.start_download("owner/model", variant="oQ4e")
+            await asyncio.sleep(0.5)
+
+            assert mock_download.call_count == 2  # dry run + real download
+            expected_dir = str(model_dir / "owner" / "model--oQ4e")
+            for call in mock_download.call_args_list:
+                assert call.kwargs["allow_patterns"] == ["oQ4e/*"]
+                assert call.kwargs["local_dir"] == expected_dir
+                assert call.kwargs["repo_id"] == "owner/model"
+
+            await downloader.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_no_variant_leaves_allow_patterns_unset(self, model_dir):
+        """Whole-repo downloads must be byte-for-byte unchanged."""
+        with patch(
+            "omlx.admin.hf_downloader.HfApi"
+        ) as mock_api_cls, patch(
+            "omlx.admin.hf_downloader.snapshot_download"
+        ) as mock_download:
+            self._mock_api(mock_api_cls)
+
+            downloader = HFDownloader(model_dir=str(model_dir))
+            await downloader.start_download("owner/model")
+            await asyncio.sleep(0.5)
+
+            assert mock_download.call_count == 2
+            expected_dir = str(model_dir / "owner" / "model")
+            for call in mock_download.call_args_list:
+                assert "allow_patterns" not in call.kwargs
+                assert call.kwargs["local_dir"] == expected_dir
+
+            await downloader.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_blank_variant_is_a_whole_repo_download(self, model_dir):
+        with patch(
+            "omlx.admin.hf_downloader.HfApi"
+        ) as mock_api_cls, patch(
+            "omlx.admin.hf_downloader.snapshot_download"
+        ) as mock_download:
+            self._mock_api(mock_api_cls)
+
+            downloader = HFDownloader(model_dir=str(model_dir))
+            task = await downloader.start_download("owner/model", variant="  ")
+            await asyncio.sleep(0.5)
+
+            assert task.variant is None
+            for call in mock_download.call_args_list:
+                assert "allow_patterns" not in call.kwargs
+                assert call.kwargs["local_dir"] == str(
+                    model_dir / "owner" / "model"
+                )
+
+            await downloader.shutdown()
+
+    # --- Flattening ---
+
+    @pytest.mark.asyncio
+    async def test_variant_files_are_flattened_to_target_root(self, model_dir):
+        with patch(
+            "omlx.admin.hf_downloader.HfApi"
+        ) as mock_api_cls, patch(
+            "omlx.admin.hf_downloader.snapshot_download"
+        ) as mock_download:
+            self._mock_api(mock_api_cls)
+            mock_download.side_effect = self._fake_snapshot("oQ4e")
+
+            downloader = HFDownloader(model_dir=str(model_dir))
+            task = await downloader.start_download("owner/model", variant="oQ4e")
+            await asyncio.sleep(0.5)
+
+            target = model_dir / "owner" / "model--oQ4e"
+            assert task.status == DownloadStatus.COMPLETED
+            assert (target / "config.json").exists()
+            assert (target / "model.safetensors").exists()
+            # Sub-directories of the variant come along intact.
+            assert (target / "nested" / "extra.json").exists()
+            # The variant level itself is gone — the result is an ordinary
+            # two-level model directory.
+            assert not (target / "oQ4e").exists()
+
+            await downloader.shutdown()
+
+    def test_flatten_replaces_leftovers_from_an_earlier_attempt(self, model_dir):
+        """A re-download's files win over a previous partial flatten."""
+        target = model_dir / "owner" / "model--oQ4e"
+        source = target / "oQ4e"
+        source.mkdir(parents=True)
+        (source / "config.json").write_text('{"new": true}')
+        (source / "weights").mkdir()
+        (source / "weights" / "shard.safetensors").write_bytes(b"new")
+
+        # Stale copies at the destination from an interrupted earlier flatten.
+        (target / "config.json").write_text('{"stale": true}')
+        (target / "weights").mkdir()
+        (target / "weights" / "stale.safetensors").write_bytes(b"old")
+
+        HFDownloader._flatten_variant(target, "oQ4e")
+
+        assert not source.exists()
+        assert json.loads((target / "config.json").read_text()) == {"new": True}
+        assert (target / "weights" / "shard.safetensors").read_bytes() == b"new"
+        assert not (target / "weights" / "stale.safetensors").exists()
+
+    def test_flatten_is_a_noop_without_the_variant_dir(self, model_dir):
+        """A missing subfolder is logged, not fatal — the task still finishes."""
+        target = model_dir / "owner" / "model--oQ4e"
+        target.mkdir(parents=True)
+        (target / "config.json").write_text("{}")
+
+        HFDownloader._flatten_variant(target, "oQ4e")
+
+        assert (target / "config.json").exists()
+
+    # --- Task bookkeeping ---
+
+    def test_task_defaults_to_no_variant(self):
+        task = DownloadTask(task_id="t", repo_id="owner/model")
+        assert task.variant is None
+        assert task.to_dict()["variant"] is None
+
+    def test_task_serializes_variant(self):
+        task = DownloadTask(task_id="t", repo_id="owner/model", variant="oQ4e")
+        assert task.to_dict()["variant"] == "oQ4e"
+
+    @pytest.mark.asyncio
+    async def test_invalid_variant_rejected_before_queueing(self, model_dir):
+        downloader = HFDownloader(model_dir=str(model_dir))
+        with pytest.raises(ValueError, match="Invalid variant"):
+            await downloader.start_download("owner/model", variant="../escape")
+        assert downloader.get_tasks() == []
+
+    @pytest.mark.asyncio
+    async def test_repo_id_validation_still_runs_with_a_variant(self, model_dir):
+        """`variant` is a separate field — it does not relax repo_id checks."""
+        downloader = HFDownloader(model_dir=str(model_dir))
+        with pytest.raises(ValueError, match="Invalid repository ID"):
+            await downloader.start_download("owner/model/oQ4e", variant="oQ4e")
+
+    @pytest.mark.asyncio
+    async def test_two_variants_of_one_repo_can_queue_together(self, model_dir):
+        with patch(
+            "omlx.admin.hf_downloader.HfApi"
+        ) as mock_api_cls, patch(
+            "omlx.admin.hf_downloader.snapshot_download"
+        ):
+            self._mock_api(mock_api_cls)
+
+            downloader = HFDownloader(model_dir=str(model_dir))
+            await downloader.start_download("owner/model", variant="oQ4e")
+            await downloader.start_download("owner/model", variant="oQ6e")
+            assert len(downloader.get_tasks()) == 2
+
+            await downloader.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_same_variant_twice_is_a_duplicate(self, model_dir):
+        with patch(
+            "omlx.admin.hf_downloader.HfApi"
+        ) as mock_api_cls, patch(
+            "omlx.admin.hf_downloader.snapshot_download"
+        ):
+            self._mock_api(mock_api_cls)
+
+            downloader = HFDownloader(model_dir=str(model_dir))
+            await downloader.start_download("owner/model", variant="oQ4e")
+            with pytest.raises(ValueError, match="already in progress"):
+                await downloader.start_download("owner/model", variant="oQ4e")
+
+            await downloader.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_retry_preserves_the_variant(self, model_dir):
+        with patch(
+            "omlx.admin.hf_downloader.HfApi"
+        ) as mock_api_cls, patch(
+            "omlx.admin.hf_downloader.snapshot_download"
+        ):
+            self._mock_api(mock_api_cls)
+
+            downloader = HFDownloader(model_dir=str(model_dir))
+            task = await downloader.start_download("owner/model", variant="oQ4e")
+            task.status = DownloadStatus.FAILED
+
+            new_task = await downloader.retry_download(task.task_id)
+            assert new_task.variant == "oQ4e"
+            assert new_task.retry_count == 1
+
+            await downloader.shutdown()
+
+    def test_cleanup_partial_targets_the_variant_directory(self, model_dir):
+        downloader = HFDownloader(model_dir=str(model_dir))
+        target = model_dir / "owner" / "model--oQ4e"
+        temp_dir = target / "._____temp"
+        temp_dir.mkdir(parents=True)
+        (temp_dir / "shard.safetensors").write_bytes(b"in-progress")
+        (target / "done.safetensors").write_bytes(b"finalized")
+
+        # A plain download of the same repo must be left alone.
+        plain = model_dir / "owner" / "model"
+        plain_temp = plain / "._____temp"
+        plain_temp.mkdir(parents=True)
+
+        task = DownloadTask(task_id="t", repo_id="owner/model", variant="oQ4e")
+        downloader._cleanup_partial(task)
+
+        assert not temp_dir.exists()
+        assert (target / "done.safetensors").exists()
+        assert plain_temp.exists()
+
+
+class TestVariantHTTPFallbackWorker:
+    """The isolated HTTP fallback must be allowed to forward allow_patterns."""
+
+    def test_allow_patterns_accepted_by_worker(self):
+        from omlx._hf_download_worker import _read_request
+
+        payload = {
+            "kwargs": {
+                "repo_id": "owner/model",
+                "local_dir": "/tmp/owner/model--oQ4e",
+                "allow_patterns": ["oQ4e/*"],
+            }
+        }
+        with patch("sys.stdin", io.StringIO(json.dumps(payload))):
+            kwargs = _read_request()
+        assert kwargs["allow_patterns"] == ["oQ4e/*"]
+
+    def test_unknown_kwargs_still_rejected(self):
+        from omlx._hf_download_worker import _read_request
+
+        payload = {"kwargs": {"repo_id": "owner/model", "subfolder": "oQ4e"}}
+        with patch("sys.stdin", io.StringIO(json.dumps(payload))):
+            with pytest.raises(ValueError, match="Unsupported download arguments"):
+                _read_request()

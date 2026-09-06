@@ -26,6 +26,7 @@ from omlx.model_discovery import (
     is_helper_config_model_type,
     is_helper_model_config,
     model_directory_access_error,
+    model_display_name,
 )
 
 
@@ -2099,3 +2100,77 @@ class TestTextOnlySizeEstimation:
 
         models = discover_models(tmp_path)
         assert models["plain-llm"].text_only_size == 0
+
+
+class TestVariantSubfolderDiscovery:
+    """A `{repo}--{variant}` directory is an ordinary second-level model dir.
+
+    Downloading a single subfolder of a multi-variant repo lands it in
+    `{owner}/{repo}--{variant}`. Discovery must treat that exactly like any
+    other organized-layout model, and it must not collide with a plain
+    `{owner}/{repo}` download of the same repo.
+    """
+
+    def _make_model(self, path: Path, model_type: str = "llama"):
+        path.mkdir(parents=True, exist_ok=True)
+        (path / "config.json").write_text(json.dumps({"model_type": model_type}))
+        (path / "model.safetensors").write_bytes(b"0" * 1000)
+
+    def test_variant_dir_is_discovered(self, tmp_path):
+        self._make_model(tmp_path / "owner" / "Model-8B--oQ4e")
+
+        models = discover_models(tmp_path)
+
+        assert set(models) == {"Model-8B--oQ4e"}
+        assert models["Model-8B--oQ4e"].model_path == str(
+            tmp_path / "owner" / "Model-8B--oQ4e"
+        )
+        assert models["Model-8B--oQ4e"].engine_type == "batched"
+
+    def test_variant_does_not_collide_with_the_plain_repo(self, tmp_path):
+        org = tmp_path / "owner"
+        self._make_model(org / "Model-8B")
+        self._make_model(org / "Model-8B--oQ4e")
+        self._make_model(org / "Model-8B--oQ6e")
+
+        models = discover_models(tmp_path)
+
+        assert set(models) == {"Model-8B", "Model-8B--oQ4e", "Model-8B--oQ6e"}
+        paths = {m.model_path for m in models.values()}
+        assert len(paths) == 3
+        assert models["Model-8B"].model_path == str(org / "Model-8B")
+        assert models["Model-8B--oQ4e"].model_path == str(org / "Model-8B--oQ4e")
+
+    def test_variant_display_name_keeps_the_on_disk_name(self, tmp_path):
+        """Shown verbatim so display, directory and settings key all agree."""
+        org = tmp_path / "owner"
+        self._make_model(org / "Model-8B--oQ4e")
+
+        assert (
+            model_display_name(
+                "Model-8B--oQ4e",
+                org / "Model-8B--oQ4e",
+                [tmp_path],
+            )
+            == "owner/Model-8B--oQ4e"
+        )
+
+    def test_variant_and_plain_display_names_stay_distinct(self, tmp_path):
+        org = tmp_path / "owner"
+        self._make_model(org / "Model-8B")
+        self._make_model(org / "Model-8B--oQ4e")
+
+        plain = model_display_name("Model-8B", org / "Model-8B", [tmp_path])
+        variant = model_display_name(
+            "Model-8B--oQ4e", org / "Model-8B--oQ4e", [tmp_path]
+        )
+        assert plain == "owner/Model-8B"
+        assert variant == "owner/Model-8B--oQ4e"
+        assert plain != variant
+
+    def test_variant_dir_is_not_read_as_an_hf_cache_entry(self, tmp_path):
+        """`--` is also the HF cache separator; only `models--` prefixes are."""
+        self._make_model(tmp_path / "owner" / "Model-8B--oQ4e")
+
+        assert _resolve_hf_cache_entry(tmp_path / "owner") is None
+        assert "Model-8B--oQ4e" in discover_models(tmp_path)
