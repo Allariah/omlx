@@ -1549,6 +1549,13 @@ def model_display_name(
     two-level layout), then to the bare model id. This is what the models
     UI shows and what benchmark uploads publish, so two releases with the
     same leaf directory name stay distinguishable.
+
+    A single-variant download of a multi-variant repo lands in
+    ``{owner}/{repo}--{variant}`` and is deliberately shown verbatim rather
+    than prettified to ``repo (variant)``: the displayed name then still
+    matches the directory on disk and the id used by settings, deletion and
+    the engine pool, and repo names may themselves contain ``--``, which a
+    split would misread.
     """
     repo_id = (source_repo_id or "").strip()
     if "/" in repo_id:

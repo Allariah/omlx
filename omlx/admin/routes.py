@@ -378,6 +378,10 @@ class HFDownloadRequest(BaseModel):
 
     repo_id: str
     hf_token: str = ""
+    # Optional subfolder of the repo to download on its own (e.g. "oQ4e" in a
+    # repo that bundles several quantizations). Independent of repo_id, which
+    # stays a plain "owner/model" id.
+    variant: str | None = None
 
 
 class HFRetryRequest(BaseModel):
@@ -6042,7 +6046,9 @@ async def start_hf_download(
         raise HTTPException(status_code=503, detail="Downloader not initialized")
 
     try:
-        task = await _hf_downloader.start_download(request.repo_id, request.hf_token)
+        task = await _hf_downloader.start_download(
+            request.repo_id, request.hf_token, request.variant
+        )
         return {"success": True, "task": task.to_dict()}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

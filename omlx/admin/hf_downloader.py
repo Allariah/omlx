@@ -271,12 +271,46 @@ class DownloadStatus(str, enum.Enum):
     CANCELLED = "cancelled"
 
 
+def variant_dir_name(repo_id: str, variant: str | None) -> str:
+    """Return the model-dir-relative path a download lands in.
+
+    Plain downloads keep the ``{owner}/{repo}`` layout. A variant download
+    (one subfolder of a multi-variant repo) lands in a sibling directory
+    named ``{owner}/{repo}--{variant}`` so it stays a normal-looking
+    second-level model directory: discovery, settings keys, deletion and the
+    engine pool all treat it exactly like any other ``owner/repo`` download.
+    """
+    return f"{repo_id}--{variant}" if variant else repo_id
+
+
+def validate_variant(variant: str | None) -> str | None:
+    """Normalize and validate an optional repo subfolder name.
+
+    Returns None for an empty/whitespace variant (whole-repo download).
+
+    Raises:
+        ValueError: If the variant is not a single plain path segment. It is
+            concatenated into a filesystem path, so separators and dot
+            segments must never reach it.
+    """
+    variant = (variant or "").strip()
+    if not variant:
+        return None
+    if "/" in variant or "\\" in variant or variant in (".", ".."):
+        raise ValueError(
+            f"Invalid variant: '{variant}'. "
+            "Expected a single subfolder name (e.g. 'oQ4e')"
+        )
+    return variant
+
+
 @dataclass
 class DownloadTask:
     """Represents a single model download task."""
 
     task_id: str
     repo_id: str
+    variant: Optional[str] = None
     status: DownloadStatus = DownloadStatus.PENDING
     progress: float = 0.0
     total_size: int = 0
@@ -292,6 +326,7 @@ class DownloadTask:
         return {
             "task_id": self.task_id,
             "repo_id": self.repo_id,
+            "variant": self.variant,
             "status": self.status.value,
             "progress": round(self.progress, 1),
             "total_size": self.total_size,
@@ -695,19 +730,24 @@ class HFDownloader:
         self._model_dir = Path(new_dir)
 
     async def start_download(
-        self, repo_id: str, hf_token: str = ""
+        self, repo_id: str, hf_token: str = "", variant: Optional[str] = None
     ) -> DownloadTask:
         """Start downloading a model from HuggingFace.
 
         Args:
             repo_id: HuggingFace repository ID (e.g., "mlx-community/Llama-3-8B-4bit").
             hf_token: Optional HuggingFace token for gated models.
+            variant: Optional subfolder of the repo to download on its own
+                (e.g. "oQ4e" for a repo bundling several quantizations). When
+                set, only that subfolder is fetched and it lands, flattened,
+                in ``{owner}/{repo}--{variant}``.
 
         Returns:
             The created DownloadTask.
 
         Raises:
-            ValueError: If repo_id format is invalid or download is already queued.
+            ValueError: If repo_id or variant format is invalid, or the same
+                download is already queued.
         """
         repo_id = repo_id.strip()
         if "/" not in repo_id or len(repo_id.split("/")) != 2:
@@ -716,18 +756,27 @@ class HFDownloader:
                 "Expected format: 'owner/model' (e.g., 'mlx-community/Llama-3-8B-4bit')"
             )
 
-        # Check for duplicate active downloads
+        variant = validate_variant(variant)
+        label = f"{repo_id}/{variant}" if variant else repo_id
+
+        # Check for duplicate active downloads. Two variants of the same repo
+        # are distinct downloads with distinct targets, so both may be queued.
         for task in self._tasks.values():
-            if task.repo_id == repo_id and task.status in (
-                DownloadStatus.PENDING,
-                DownloadStatus.DOWNLOADING,
+            if (
+                task.repo_id == repo_id
+                and task.variant == variant
+                and task.status
+                in (
+                    DownloadStatus.PENDING,
+                    DownloadStatus.DOWNLOADING,
+                )
             ):
                 raise ValueError(
-                    f"Download for '{repo_id}' is already in progress"
+                    f"Download for '{label}' is already in progress"
                 )
 
         task_id = str(uuid.uuid4())
-        task = DownloadTask(task_id=task_id, repo_id=repo_id)
+        task = DownloadTask(task_id=task_id, repo_id=repo_id, variant=variant)
         self._tasks[task_id] = task
 
         # Start download in background
@@ -735,7 +784,7 @@ class HFDownloader:
             self._run_download(task_id, hf_token)
         )
 
-        logger.info(f"Download queued: {repo_id} (task_id={task_id})")
+        logger.info(f"Download queued: {label} (task_id={task_id})")
         return task
 
     async def cancel_download(self, task_id: str) -> bool:
@@ -829,6 +878,7 @@ class HFDownloader:
             )
 
         repo_id = old_task.repo_id
+        variant = old_task.variant
         old_retry_count = old_task.retry_count
 
         # Remove old task entry
@@ -836,7 +886,7 @@ class HFDownloader:
         self._cancelled.discard(task_id)
 
         # Start fresh download (snapshot_download resumes from existing files)
-        new_task = await self.start_download(repo_id, hf_token)
+        new_task = await self.start_download(repo_id, hf_token, variant)
         new_task.retry_count = old_retry_count + 1
         return new_task
 
@@ -892,8 +942,11 @@ class HFDownloader:
 
                 # Preserve {owner}/{model} layout to match other tools
                 # (LMStudio, huggingface-cli) and avoid duplicate downloads
-                # when sharing a model directory.
-                target_dir = self._model_dir / task.repo_id
+                # when sharing a model directory. A variant download gets its
+                # own {owner}/{model}--{variant} sibling directory.
+                target_dir = self._model_dir / variant_dir_name(
+                    task.repo_id, task.variant
+                )
 
                 api, endpoint = _get_hf_api()
 
@@ -939,6 +992,12 @@ class HFDownloader:
                 }
                 if ignore_patterns:
                     dl_kwargs["ignore_patterns"] = ignore_patterns
+                if task.variant:
+                    # snapshot_download has no `subfolder` parameter, so a
+                    # single-variant fetch is expressed as a path filter.
+                    # Files therefore land under {target_dir}/{variant}/ and
+                    # are flattened up once the transfer completes.
+                    dl_kwargs["allow_patterns"] = [f"{task.variant}/*"]
 
                 # Get accurate total size via dry run so the progress
                 # denominator matches what will actually be downloaded.
@@ -1021,6 +1080,11 @@ class HFDownloader:
                 # Check if cancelled while downloading
                 if task_id in self._cancelled:
                     return
+
+                # Lift the variant subfolder's contents to the target root so
+                # the result is structurally a normal model directory.
+                if task.variant:
+                    self._flatten_variant(target_dir, task.variant)
 
                 # Success
                 task.status = DownloadStatus.COMPLETED
@@ -1299,6 +1363,42 @@ class HFDownloader:
             pass
         return total
 
+    @staticmethod
+    def _flatten_variant(target_dir: Path, variant: str) -> None:
+        """Move ``{target_dir}/{variant}/*`` up to ``{target_dir}/``.
+
+        ``allow_patterns=["{variant}/*"]`` preserves the repo's own layout, so
+        a completed variant download sits one level too deep. Lifting it makes
+        the directory indistinguishable from a plain ``owner/repo`` download,
+        which is what every consumer (discovery, settings, deletion, the
+        engine pool) already understands.
+        """
+        source_dir = target_dir / variant
+        if not source_dir.is_dir():
+            logger.warning(
+                f"Expected variant subfolder {source_dir} after download; "
+                "nothing to flatten"
+            )
+            return
+
+        for entry in list(source_dir.iterdir()):
+            destination = target_dir / entry.name
+            if destination.exists() or destination.is_symlink():
+                # Leftover from an earlier interrupted flatten of the same
+                # variant. The freshly downloaded copy is authoritative.
+                if destination.is_dir() and not destination.is_symlink():
+                    shutil.rmtree(destination)
+                else:
+                    destination.unlink()
+            shutil.move(str(entry), str(destination))
+
+        try:
+            source_dir.rmdir()
+        except OSError as e:
+            logger.warning(f"Could not remove emptied variant dir {source_dir}: {e}")
+
+        logger.info(f"Flattened variant '{variant}' into {target_dir}")
+
     def _cleanup_partial(self, task: DownloadTask) -> None:
         """Remove in-progress shards while keeping finalized files for resume.
 
@@ -1308,7 +1408,7 @@ class HFDownloader:
         for; finalized files are visible in the file browser, so users can
         keep them for auto-resume on retry or remove them themselves.
         """
-        target_dir = self._model_dir / task.repo_id
+        target_dir = self._model_dir / variant_dir_name(task.repo_id, task.variant)
         temp_dir = target_dir / "._____temp"
         if temp_dir.exists():
             try:
