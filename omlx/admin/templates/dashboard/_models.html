@@ -264,6 +264,19 @@
                                                       bg-white font-mono text-xs"
                                         >
                                     </div>
+                                    <div class="w-full sm:w-56">
+                                        <label class="block text-xs font-medium text-neutral-500 uppercase tracking-wider mb-1.5">
+                                            {{ t('models.downloader.variant') }} <span class="text-neutral-400 normal-case">{{ t('models.downloader.variant_optional') }}</span>
+                                        </label>
+                                        <input type="text" x-model="hfVariant"
+                                               @keydown.enter="startHFDownload()"
+                                               placeholder="{{ t('models.downloader.variant_placeholder') }}"
+                                               title="{{ t('models.downloader.variant_hint') }}"
+                                               class="w-full px-4 py-2.5 border border-neutral-200 rounded-xl text-sm
+                                                      focus:ring-2 focus:ring-neutral-900 focus:border-transparent transition-all
+                                                      bg-white font-mono text-xs"
+                                        >
+                                    </div>
                                     <div class="w-full sm:w-48">
                                         <label class="block text-xs font-medium text-neutral-500 uppercase tracking-wider mb-1.5">
                                             {{ t('models.downloader.hf_token') }} <span class="text-neutral-400 normal-case">{{ t('models.downloader.hf_token_optional') }}</span>
@@ -797,6 +810,10 @@
                                                 <div class="flex-1 min-w-0">
                                                     <div class="flex items-center gap-2 flex-wrap">
                                                         <span class="text-sm font-medium text-neutral-900 truncate" x-text="task.repo_id"></span>
+                                                        <span x-show="task.variant" x-cloak
+                                                              class="px-2 py-0.5 text-[10px] font-semibold tracking-wider rounded-full shrink-0
+                                                                     bg-neutral-100 text-neutral-600 border border-neutral-200 font-mono"
+                                                              x-text="task.variant"></span>
                                                         <span class="px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded-full shrink-0"
                                                               :class="{
                                                                   'bg-blue-50 text-blue-700 border border-blue-200': task.status === 'downloading',

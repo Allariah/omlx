@@ -570,6 +570,8 @@
 
             // HF Downloader state
             hfRepoId: '',
+            // Optional subfolder within the repo (e.g. "oQ4e"). Blank = whole repo.
+            hfVariant: '',
             hfToken: '',
             hfDownloading: false,
             hfTasks: [],
@@ -11159,9 +11161,17 @@
             // HuggingFace Downloader Functions
             // =================================================================
 
+            // Normalise the optional variant subfolder: trim whitespace and any
+            // surrounding slashes so "/oQ4e/" and "oQ4e" both reach the API as "oQ4e".
+            // Returns '' when the user left the field blank.
+            normalizeHFVariant() {
+                return (this.hfVariant || '').trim().replace(/^\/+|\/+$/g, '').trim();
+            },
+
             async startHFDownload() {
                 const repoId = this.hfRepoId.trim();
                 if (!repoId) return;
+                const variant = this.normalizeHFVariant();
 
                 this.hfError = '';
                 this.hfSuccess = '';
@@ -11170,19 +11180,26 @@
                 const timeoutId = setTimeout(() => controller.abort(), 15000);
 
                 try {
+                    const payload = {
+                        repo_id: repoId,
+                        hf_token: this.hfToken,
+                    };
+                    // Omit the key entirely when blank so the backend keeps its
+                    // Optional[str] = None default (whole-repo download).
+                    if (variant) payload.variant = variant;
+
                     const response = await fetch('/admin/api/hf/download', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            repo_id: repoId,
-                            hf_token: this.hfToken,
-                        }),
+                        body: JSON.stringify(payload),
                         signal: controller.signal,
                     });
 
                     if (response.ok) {
-                        this.hfSuccess = window.t('js.success.download_started').replace('{repo_id}', repoId);
+                        const startedLabel = variant ? `${repoId}/${variant}` : repoId;
+                        this.hfSuccess = window.t('js.success.download_started').replace('{repo_id}', startedLabel);
                         this.hfRepoId = '';
+                        this.hfVariant = '';
                         await this.loadHFTasks();
                         this.startHFRefresh();
                         setTimeout(() => { this.hfSuccess = ''; }, 5000);
@@ -11784,6 +11801,9 @@
 
             downloadRecommended(repoId) {
                 this.hfRepoId = repoId;
+                // Recommended entries are whole repos: never inherit a stale variant
+                // the user typed for a different download.
+                this.hfVariant = '';
                 this.startHFDownload();
             },
 
