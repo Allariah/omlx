@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import struct as _struct
+import sys
 import tempfile
 import time as _time
 from dataclasses import dataclass
@@ -33,6 +34,9 @@ try:
     from mlx.utils import tree_flatten, tree_unflatten
     from mlx_lm.models.base import create_attention_mask
     from mlx_lm.utils import _get_classes
+
+    from omlx.patches import minimax_m3_dspark as minimax_dspark
+    from omlx.patches.mlx_vlm_minimax_m3_compat import virtual_nvfp4 as minimax_nvfp4
 
     HAS_MLX = True
 except ImportError:
@@ -67,6 +71,7 @@ _OQ_DEFAULT_GROUP_SIZE = 64
 
 _GLM_INDEXER_Q8 = {"bits": 8, "group_size": 64, "mode": "affine"}
 _GLM_INDEXER_PROJECTIONS = ("wq_b", "wk", "weights_proj")
+_MINIMAX_INDEXER_PROJECTIONS = ("index_q_proj", "index_k_proj")
 
 _QWEN4_EXP_NGRAM_GROUP_SIZE = 32
 _QWEN4_EXP_NGRAM_SHARD_RE = re.compile(
@@ -454,7 +459,10 @@ def _configure_minimax_shared_expert_layout(config: dict, oq_level: float) -> bo
     """
     if not _is_minimax_m3_config(config):
         return False
-    if int(_LEVEL_BITS.get(oq_level, oq_level)) >= 8:
+    # NVFP4 routed experts can never share a bank with the MXFP8 shared expert.
+    if int(
+        _LEVEL_BITS.get(oq_level, oq_level)
+    ) >= 8 and not minimax_nvfp4.has_nvfp4_routed_experts(config):
         return False
     text_config = config.get("text_config")
     if not isinstance(text_config, dict):
@@ -579,6 +587,30 @@ def _glm_indexer_q8_override(path: str, config: dict) -> dict | None:
     return dict(_GLM_INDEXER_Q8)
 
 
+def _minimax_indexer_q8_override(path: str, config: dict) -> dict | None:
+    """Return the mandatory Q8 spec for MiniMax M3 sparse-attention indexers.
+
+    The indexer picks which key blocks every query attends to, so quantization
+    error changes the selection itself rather than adding noise. Its two
+    projections are about 236M parameters on M3.1, so Q8 adds roughly 0.1 GB.
+    From an MXFP8 source the Q8 floor passes the source bytes through.
+    """
+    if not _is_minimax_m3_config(config):
+        return None
+    path = _normalize_quant_path(path)
+    if not path.endswith(
+        tuple(f".self_attn.{name}" for name in _MINIMAX_INDEXER_PROJECTIONS)
+    ):
+        return None
+    return dict(_GLM_INDEXER_Q8)
+
+
+def _indexer_q8_override(path: str, config: dict) -> dict | None:
+    return _glm_indexer_q8_override(path, config) or _minimax_indexer_q8_override(
+        path, config
+    )
+
+
 def _is_qwen4_exp_ngram_embedding_tensor(path: str, config: dict) -> bool:
     """Return whether *path* is one Qwen4-Exp PLE embedding shard.
 
@@ -639,9 +671,9 @@ def universal_quant_predicate(
     if path in non_quantizable:
         return False
 
-    glm_indexer_override = _glm_indexer_q8_override(path, config)
-    if glm_indexer_override is not None:
-        return glm_indexer_override
+    indexer_override = _indexer_q8_override(path, config)
+    if indexer_override is not None:
+        return indexer_override
 
     tc = config.get("text_config", {})
     num_layers = config.get("num_hidden_layers") or tc.get("num_hidden_layers", 32)
@@ -1207,13 +1239,14 @@ def _build_quant_plan(
     boost_map: dict[str, dict] = {}
     fixed_overrides = fixed_overrides or {}
 
-    # GLM DSA indexers are a format invariant, not an optional sensitivity
-    # boost. Seed them before pricing the plan and never let the bpw cap drop
-    # them. On GLM-5.2 all 22 indexers together are only about 209 MiB at Q8.
+    # GLM DSA and MiniMax indexers are a format invariant, not an optional
+    # sensitivity boost. Seed them before pricing the plan and never let the
+    # bpw cap drop them. On GLM-5.2 all 22 indexers together are only about
+    # 209 MiB at Q8.
     for path in named_shapes:
         if path in fixed_overrides:
             continue
-        override = _glm_indexer_q8_override(path, config)
+        override = _indexer_q8_override(path, config)
         if override is not None:
             boost_map[path] = override
 
@@ -4513,6 +4546,15 @@ def _build_model_sanitizer(
                 )
 
                 _vlm_sanitize._omlx_cast_predicate = glm5_next_cast_predicate
+            if model_type in ("minimax_m3", "minimax_m3_vl"):
+                # Take the predicate from the language module the config
+                # resolved to. Importing it by name could load upstream
+                # mlx-vlm's module of the same name ahead of the vendored one.
+                language_cls = getattr(model_module, "LanguageModel", None)
+                language = sys.modules.get(getattr(language_cls, "__module__", ""))
+                predicate = getattr(language, "cast_predicate", None)
+                if predicate is not None:
+                    _vlm_sanitize._omlx_cast_predicate = predicate
 
             logger.info(
                 f"Using mlx-vlm full sanitize chain for "
@@ -4712,6 +4754,17 @@ def _copy_model_sidecars(
         shutil.copy2(py_file, output / py_file.name)
 
 
+def _copy_bundled_drafts(source: Path, output: Path) -> None:
+    """Copy a bundled speculative draft checkpoint next to the output.
+
+    MiniMax M3.1 ships its DSpark draft in ``dspark/``. The draft stays in its
+    source precision: it is small and only affects draft acceptance.
+    """
+    draft = minimax_dspark.bundled_dspark_path(source)
+    if draft is not None:
+        shutil.copytree(draft, output / draft.name, dirs_exist_ok=True)
+
+
 def _build_non_quantizable_set(config: dict) -> set:
     """Find module paths with 2D weights that lack to_quantized() support.
 
@@ -4885,6 +4938,11 @@ class _VirtualTensor(NamedTuple):
     dtype: str
     materialize: Callable
     hides: tuple
+    # Optional packed source form: ``load_packed()`` returns (weight, scales)
+    # in the mlx format that ``quant_info`` describes, so the quantizer can
+    # pass the source through instead of re-quantizing the materialized value.
+    quant_info: dict | None = None
+    load_packed: Callable | None = None
 
 
 class _LazyTensorIndex:
@@ -4969,7 +5027,17 @@ class _LazyTensorIndex:
 
         register_virtual_tensors(self, config)
 
-    def register_virtual(self, key, shape, dtype, materializer, *, hides=()):
+    def register_virtual(
+        self,
+        key,
+        shape,
+        dtype,
+        materializer,
+        *,
+        hides=(),
+        quant_info=None,
+        load_packed=None,
+    ):
         """Declare ``key`` as produced on demand by ``materializer``.
 
         ``shape``/``dtype`` describe the logical tensor as sanitize and the
@@ -4977,11 +5045,18 @@ class _LazyTensorIndex:
         ``"BF16"``). ``hides`` lists the on-disk keys it is derived from; they
         stay readable via :meth:`load_source` but disappear from the logical
         view so sanitize never sees the pre-restructure layout.
+
+        ``quant_info`` and ``load_packed`` describe an optional packed form
+        that can be passed through like a native mxfp4/mxfp8 source pair.
         """
+        if (quant_info is None) != (load_packed is None):
+            raise ValueError("quant_info and load_packed must be given together")
         self._virtual[key] = _VirtualTensor(
-            tuple(shape), dtype, materializer, tuple(hides)
+            tuple(shape), dtype, materializer, tuple(hides), quant_info, load_packed
         )
         self._hidden.update(hides)
+        if quant_info is not None:
+            self._src_quant[key] = dict(quant_info)
 
     def materialize_virtual(self, key):
         """Produce a virtual tensor's value."""
@@ -4997,6 +5072,8 @@ class _LazyTensorIndex:
         entry = self._virtual.pop(key, None)
         if entry is None:
             return
+        if entry.quant_info is not None:
+            self._src_quant.pop(key, None)
         still_hidden = set()
         for other in self._virtual.values():
             still_hidden.update(other.hides)
@@ -5204,6 +5281,9 @@ class _LazyTensorIndex:
         source_quant_info. fp8_block scales are expanded from per-block to
         per-32-column-group, mirroring the model sanitize's repeat expansion.
         """
+        virtual = self._virtual.get(wk)
+        if virtual is not None and virtual.load_packed is not None:
+            return virtual.load_packed()
         sk = self._fp8_pairs[wk]
         info = self._src_quant[wk]
         weight_raw = self._load_raw(wk)
@@ -7293,6 +7373,20 @@ def quantize_oq_streaming(
                     {"processed_bytes": processed_bytes, "total_bytes": total_bytes},
                 )
 
+    minimax_nvfp4_experts = _is_minimax_m3_config(
+        config
+    ) and minimax_nvfp4.has_nvfp4_routed_experts(config)
+    if minimax_nvfp4_experts:
+        scale_tensors = minimax_nvfp4.routed_expert_scale_tensors(
+            getattr(all_weights, "_lazy", all_weights), config, per_layer_config
+        )
+        out_shard_data.update(scale_tensors)
+        # mlx-lm applies a projection's global_scale only when its quantization
+        # entry says so.
+        for key in scale_tensors:
+            base = key[: -len(".global_scale")]
+            per_layer_config[base] = {**per_layer_config[base], "global_scale": True}
+
     del all_weights
     mx.synchronize()
     mx.clear_cache()
@@ -7397,6 +7491,11 @@ def quantize_oq_streaming(
         quant_info[key] = val
     output_config["quantization"] = quant_info
     output_config["quantization_config"] = quant_info
+    if minimax_nvfp4_experts:
+        output_config["text_config"] = {
+            **output_config["text_config"],
+            "routed_expert_scales": True,
+        }
     _apply_output_dtype(output_config, dtype)
     with open(output / "config.json", "w") as f:
         json.dump(output_config, f, indent=2, ensure_ascii=False)
@@ -7410,6 +7509,8 @@ def quantize_oq_streaming(
     for name in DECISION_SIDECAR_FILES:
         if (source / name).is_file():
             shutil.copy2(source / name, output / name)
+    if not text_only:
+        _copy_bundled_drafts(source, output)
 
     if mimo_multimodal:
         from .patches.mimo_v2.omnimodal import export_sidecars
