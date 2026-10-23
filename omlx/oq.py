@@ -4490,34 +4490,6 @@ def _cast_passthrough_tensor(tensor_name: str, w_mx, target_dtype):
     return w_mx
 
 
-def _build_flint_sanitizer(config: dict) -> Callable[[dict], dict]:
-    from mlx_vlm.models.flint.config import ModelConfig
-    from mlx_vlm.models.flint.flint import Model
-    from mlx_vlm.models.flint.language import LanguageModel, SparseMoeBlock
-
-    args = ModelConfig.from_dict(config)
-    # Native sanitize inspects only args and layer kinds. Avoid allocating
-    # model weights just to discover a streaming sanitize plan.
-    model = Model.__new__(Model)
-    nn.Module.__init__(model)
-    language = LanguageModel.__new__(LanguageModel)
-    nn.Module.__init__(language)
-    language.args = args
-    language.model = nn.Module()
-    layers = []
-    for index in range(args.num_hidden_layers):
-        layer = nn.Module()
-        if index in args.mlp_only_layers:
-            layer.mlp = nn.Module()
-        else:
-            layer.mlp = SparseMoeBlock.__new__(SparseMoeBlock)
-            nn.Module.__init__(layer.mlp)
-        layers.append(layer)
-    language.model.layers = layers
-    model.language_model = language
-    return model.sanitize
-
-
 def _build_model_sanitizer(
     config: dict,
     text_only: bool = False,
@@ -4539,7 +4511,9 @@ def _build_model_sanitizer(
     if _is_muse_spark(config):
         return muse_spark_layout.sanitizer(config, text_only=text_only)
     if config.get("model_type") == "flint":
-        return _build_flint_sanitizer(config)
+        from mlx_vlm.models.flint import Model, ModelConfig
+
+        return Model(ModelConfig.from_dict(config)).sanitize
     architectures = config.get("architectures", [])
     # Detect VLMs by the canonical vision-subconfig predicate (used everywhere
     # else in oq.py), not just the ForConditionalGeneration arch name. OCR VLMs
@@ -5945,8 +5919,6 @@ def _source_imatrix_signature(
         # GLM-5.3 needs its mHC-expanded layer walk plus the untied output-head
         # capture. Older caches completed without either and must not be reused.
         signature["layer_walk"] = "glm5_next_hc_moe_lm_head_v4"
-    elif str(config.get("model_type", "")).lower() == "flint":
-        signature["layer_walk"] = "flint_native_masks_fp32_head_v1"
     return signature
 
 
@@ -7261,7 +7233,7 @@ def quantize_oq_streaming(
         preserve_mtp=preserve_mtp,
     )
     source_model_type = _stream_source_model_type(config)
-    if sanitize_fn is None and source_model_type in {"qwen4_exp", "glm5_next", "flint"}:
+    if sanitize_fn is None and source_model_type in {"qwen4_exp", "glm5_next"}:
         raise RuntimeError(
             f"no model sanitizer for {source_model_type}: refusing to quantize on raw "
             "checkpoint keys (the recipe's tensor rules would not match)"
@@ -7280,8 +7252,6 @@ def quantize_oq_streaming(
                 f"{len(all_weights)} output tensors"
             )
         except Exception as e:
-            if source_model_type == "flint":
-                raise RuntimeError("Flint streaming sanitize discovery failed") from e
             if _model_requires_proxy:
                 raise RuntimeError(
                     f"oQ{oq_level:g}: streaming sanitize-plan discovery "
@@ -8095,6 +8065,7 @@ _GEMMA4_LAYER_STATE_KIND = "gemma4_shared_kv"
 _QWEN4_EXP_LAYER_STATE_KIND = "qwen4_exp"
 _GLM5_NEXT_LAYER_STATE_KIND = "glm5_next"
 _EMBEDDING_GEMMA2_LAYER_STATE_KIND = "embedding_gemma2"
+_FLINT_LAYER_STATE_KIND = "flint"
 
 
 def _find_layer_model(model, layers):
@@ -8368,10 +8339,11 @@ def _commit_layer_forward_aux(state, layer_idx: int, aux, fallback=None) -> None
 
 def _forward_layer_result(block, inputs, mask, position_ids, layer_idx=None):
     """Forward pass through a transformer layer, returning output and aux."""
-    if isinstance(position_ids, dict) and position_ids.get("kind") == "flint":
-        from mlx_vlm.models.base import create_attention_mask as native_attention_mask
-
-        mask = native_attention_mask(
+    if (
+        isinstance(position_ids, dict)
+        and position_ids.get("kind") == _FLINT_LAYER_STATE_KIND
+    ):
+        mask = create_attention_mask(
             inputs, None, window_size=block.self_attn.window_size
         )
         return block(inputs, mask=mask, cache=None), None
@@ -8638,7 +8610,7 @@ def _prepare_layer_inputs(model, layers, calib_data, inputs, *, noncausal=False)
         )
     )
     if model_type == "flint":
-        return inputs, [None] * len(layers), {"kind": "flint"}
+        return inputs, [None] * len(layers), {"kind": _FLINT_LAYER_STATE_KIND}
     gemma4_inputs = _prepare_gemma4_layer_inputs(model, layers, calib_data, inputs)
     if gemma4_inputs is not None:
         return gemma4_inputs
@@ -8998,9 +8970,7 @@ class OQImatrixCollector:
             logger.debug("oQe imatrix switch capture skipped for %s: %s", name, e)
 
 
-def _collect_untied_lm_head_imatrix(
-    core, hidden, collector, name, *, cast_fp32: bool = False
-) -> bool:
+def _collect_untied_lm_head_imatrix(core, hidden, collector, name) -> bool:
     """Capture normalized head inputs without materializing vocabulary logits."""
     norm = getattr(core, "norm", None)
     if core is None or norm is None:
@@ -9012,33 +8982,17 @@ def _collect_untied_lm_head_imatrix(
 
     if getattr(hidden, "ndim", 0) == 4:
         hidden = hidden.mean(axis=2)
-    normalized = norm(hidden)
-    if cast_fp32:
-        normalized = normalized.astype(mx.float32)
-    collector.collect_dense(name, module, normalized)
+    collector.collect_dense(name, module, norm(hidden))
     return name in collector.entries
 
 
-def _collect_glm5_next_lm_head_imatrix(model, hidden, collector) -> bool:
-    if str(getattr(model, "model_type", "")) != "glm5_next":
+def _collect_language_model_lm_head_imatrix(model, hidden, collector) -> bool:
+    if str(getattr(model, "model_type", "")) not in ("glm5_next", "flint"):
         return False
     language_model = getattr(model, "language_model", None)
     core = getattr(language_model, "model", None)
     return _collect_untied_lm_head_imatrix(
         core, hidden, collector, "language_model.lm_head"
-    )
-
-
-def _collect_flint_lm_head_imatrix(model, hidden, collector) -> bool:
-    if str(getattr(model, "model_type", "")) != "flint":
-        return False
-    language = getattr(model, "language_model", None)
-    return _collect_untied_lm_head_imatrix(
-        getattr(language, "model", None),
-        hidden,
-        collector,
-        "language_model.lm_head",
-        cast_fp32=True,
     )
 
 
@@ -9341,8 +9295,7 @@ def _collect_imatrix_from_model(
                     mx.synchronize()
                     mx.clear_cache()
 
-                _collect_glm5_next_lm_head_imatrix(model, inputs, collector)
-                _collect_flint_lm_head_imatrix(model, inputs, collector)
+                _collect_language_model_lm_head_imatrix(model, inputs, collector)
                 _collect_k2_horizon_lm_head_imatrix(model, inputs, collector)
 
                 # Match the head's decode-time hidden-state normalization.
@@ -9920,7 +9873,7 @@ def _streamed_sensitivity_state(
         return {
             "inputs": inputs,
             "mask": None,
-            "position_ids": {"kind": "flint"},
+            "position_ids": {"kind": _FLINT_LAYER_STATE_KIND},
             "scores": {},
         }
     if _stream_source_model_type(config) == "glm5_next":
@@ -10065,8 +10018,7 @@ def _collect_streamed_untied_lm_head(source, config, collector, working) -> int:
         return 0
     head_weight = plan.pop(head_key)
     norm_weight = plan.pop(norm_key)
-    is_flint = _stream_source_model_type(config) == "flint"
-    text_config = config if is_flint else config.get("text_config") or {}
+    text_config = config.get("text_config") or config
     hidden_size = int(head_weight.shape[1])
     norm = nn.RMSNorm(hidden_size, eps=float(text_config.get("rms_norm_eps") or 1e-6))
     norm.weight = norm_weight
@@ -10078,10 +10030,7 @@ def _collect_streamed_untied_lm_head(source, config, collector, working) -> int:
     before = len(collector.entries)
     for hidden in working:
         h = hidden.mean(axis=2) if getattr(hidden, "ndim", 0) == 4 else hidden
-        normalized = norm(h)
-        if is_flint:
-            normalized = normalized.astype(mx.float32)
-        collector.collect_dense("language_model.lm_head", head, normalized)
+        collector.collect_dense("language_model.lm_head", head, norm(h))
     del norm, head, head_weight, norm_weight
     mx.clear_cache()
     return 1 if len(collector.entries) > before else 0
@@ -10270,7 +10219,7 @@ def _collect_imatrix_streaming(
         position_ids = {"kind": _GLM5_NEXT_LAYER_STATE_KIND}
     elif _stream_source_model_type(config) == "flint":
         mask = None
-        position_ids = {"kind": "flint"}
+        position_ids = {"kind": _FLINT_LAYER_STATE_KIND}
     else:
         # One causal mask and one position-id row serve every layer and every
         # micro-batch: both depend only on seq_length and the activation dtype.

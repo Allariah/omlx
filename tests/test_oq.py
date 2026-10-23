@@ -7608,7 +7608,7 @@ class TestGlm5NextLayerWalk:
 
     def test_hyper_connections_and_moe_imatrix_hooks_execute(self):
         from omlx.patches import mlx_vlm_glm5_next_compat
-        from omlx.oq import _collect_glm5_next_lm_head_imatrix
+        from omlx.oq import _collect_language_model_lm_head_imatrix
         from tests.test_mlx_vlm_glm5_next_compat import _tiny_config
 
         mlx_vlm_glm5_next_compat.apply_mlx_vlm_glm5_next_compat_patch()
@@ -7647,7 +7647,7 @@ class TestGlm5NextLayerWalk:
                 )
                 mx.eval(inputs)
 
-            assert _collect_glm5_next_lm_head_imatrix(model, inputs, collector)
+            assert _collect_language_model_lm_head_imatrix(model, inputs, collector)
             switch_entries = {
                 name: entry
                 for name, entry in collector.entries.items()
@@ -7708,6 +7708,178 @@ class TestGlm5NextLayerWalk:
         finally:
             collector.restore(head)
         assert "language_model.mtp.0.block.self_attn.embed_q" in collector.entries
+
+
+def _flint_config(window=513):
+    from mlx_vlm.models.flint.config import ModelConfig
+
+    return ModelConfig(
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=3,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        vocab_size=128,
+        layer_types=["full_attention", "sliding_attention", "full_attention"],
+        no_rope_layer_indices=[0, 2],
+        mlp_only_layers=[0],
+        num_experts=2,
+        num_experts_per_tok=2,
+        moe_intermediate_size=64,
+        shared_expert_intermediate_size=64,
+        sliding_window=window,
+        eos_token_id=[2],
+    )
+
+
+def _flint_checkpoint(path, window=513):
+    """Save a BF16 Flint checkpoint in the original one-tensor-per-expert layout."""
+    from dataclasses import asdict
+
+    from mlx.utils import tree_flatten
+    from mlx_vlm.models.flint.flint import Model
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from tokenizers.pre_tokenizers import Whitespace
+    from transformers import PreTrainedTokenizerFast
+
+    mx.random.seed(17)
+    args = _flint_config(window)
+    model = Model(args)
+    model.set_dtype(mx.bfloat16)
+    weights = {}
+    for key, value in tree_flatten(model.parameters()):
+        key = key.removeprefix("language_model.")
+        if ".switch_mlp." in key:
+            prefix, projection = key.split(".switch_mlp.")
+            for expert in range(args.num_experts):
+                weights[f"{prefix}.experts.{expert}.{projection}"] = value[expert]
+        elif not key.endswith(".expert_bias"):
+            weights[key] = value
+    path.mkdir()
+    mx.save_safetensors(str(path / "model.safetensors"), weights)
+    config = {**asdict(args), "architectures": ["FlintForCausalLM"]}
+    (path / "config.json").write_text(json.dumps(config))
+    vocab = {f"t{index}": index for index in range(args.vocab_size)}
+    tokenizer = Tokenizer(WordLevel(vocab, unk_token="t0"))
+    tokenizer.pre_tokenizer = Whitespace()
+    PreTrainedTokenizerFast(tokenizer_object=tokenizer, unk_token="t0").save_pretrained(
+        path
+    )
+    return model, config
+
+
+@pytest.mark.skipif(not HAS_MLX, reason="MLX not available")
+class TestFlintCalibration:
+    @pytest.mark.parametrize("window,length", [(3, 6), (513, 514)])
+    def test_layer_walk_matches_native_forward(self, window, length):
+        from mlx_vlm.models.flint.flint import Model
+
+        from omlx.oq import (
+            _collect_language_model_lm_head_imatrix,
+            _prepare_layer_inputs,
+        )
+
+        mx.random.seed(5)
+        model = Model(_flint_config(window))
+        model.set_dtype(mx.bfloat16)
+        tokens = (mx.arange(length)[None, :] % 100).astype(mx.int32)
+        core = model.language_model.model
+        inputs = core.embed_tokens(tokens)
+        inputs, masks, state = _prepare_layer_inputs(
+            model, model.layers, tokens, inputs
+        )
+        for index, layer in enumerate(model.layers):
+            inputs, _ = _forward_layer_result(
+                layer, inputs, masks[index], state, layer_idx=index
+            )
+        assert mx.array_equal(core.norm(inputs), core(tokens)).item()
+
+        collector = OQImatrixCollector()
+        collector.install(model)
+        try:
+            assert _collect_language_model_lm_head_imatrix(model, inputs, collector)
+        finally:
+            collector.restore(model)
+
+    @pytest.mark.parametrize("window", [3, 513])
+    def test_streamed_calibration_matches_resident(self, tmp_path, monkeypatch, window):
+        import omlx.oq as oq
+
+        source = tmp_path / "source"
+        model, config = _flint_checkpoint(source, window)
+        length = window + 3
+        tokens = (mx.arange(8 * length).reshape(8, length) % 100).astype(mx.int32)
+        monkeypatch.setattr(oq, "_load_calibration_data", lambda *a, **kw: tokens)
+        resident, _ = oq._collect_imatrix_from_model(
+            model,
+            object(),
+            config,
+            calib_dataset=oq._OQE_CALIB_DATASET,
+            num_samples=2,
+            seq_length=length,
+        )
+        sensitivity = oq._measure_sensitivity_from_model(
+            model, object(), config, 4, num_samples=2, seq_length=length
+        )
+
+        streamed = oq._load_or_collect_imatrix(
+            str(source),
+            config,
+            cache_path=str(tmp_path / "imatrix.npz"),
+            reuse_cache=False,
+            num_samples=2,
+            seq_length=length,
+            strict=True,
+            trust_remote_code=False,
+            stream_calibration=True,
+            measure_sensitivity=True,
+            sensitivity_oq_level=4,
+            sensitivity_num_samples=2,
+            sensitivity_seq_length=length,
+            require_mtp_entries=False,
+        )
+
+        assert "language_model.lm_head" in streamed.entries
+        assert streamed.entries.keys() == resident.keys()
+        for name, entry in resident.items():
+            np.testing.assert_array_equal(streamed.entries[name].counts, entry.counts)
+            np.testing.assert_allclose(
+                streamed.entries[name].in_sum2, entry.in_sum2, rtol=1e-5
+            )
+        measured = streamed.metadata["collection"]["sensitivity_map"]
+        assert measured == pytest.approx(sensitivity, abs=1e-6)
+
+    @pytest.mark.parametrize("stream_calibration", [False, True])
+    def test_oqe_output_strictly_reloads(
+        self, tmp_path, monkeypatch, stream_calibration
+    ):
+        from mlx_vlm.utils import load_model
+
+        import omlx.oq as oq
+
+        source = tmp_path / "source"
+        _flint_checkpoint(source)
+        tokens = (mx.arange(128).reshape(8, 16) % 100).astype(mx.int32)
+        monkeypatch.setattr(oq, "_load_calibration_data", lambda *a, **kw: tokens)
+        output = tmp_path / "output"
+        oq.quantize_oq_streaming(
+            str(source),
+            str(output),
+            4,
+            enhanced=True,
+            stream_calibration=stream_calibration,
+            auto_proxy_sensitivity=False,
+            imatrix_strict=True,
+            imatrix_num_samples=2,
+            imatrix_seq_length=16,
+        )
+
+        loaded = load_model(output, lazy=False, strict=True, trust_remote_code=False)
+        assert mx.isfinite(loaded(tokens[:1]).logits).all().item()
+        report = json.loads((output / "oq_imatrix_report.json").read_text())
+        assert report["applied"] and not report["missing"] and not report["mismatched"]
 
 
 @pytest.mark.skipif(not HAS_MLX, reason="MLX not available")

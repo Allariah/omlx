@@ -3439,6 +3439,18 @@ async def test_preflight_text_only_image_support(model_type, vision_config, with
         engine._preflight_or_raise_with_eviction.assert_awaited_once()
 
 
+@pytest.mark.skipif(not HAS_MLX, reason="mlx is required to import VLMBatchedEngine")
+@pytest.mark.parametrize("media", ["images", "audio"])
+def test_flint_rejects_media_input(media):
+    engine = _make_loaded_engine(model_type="flint")
+
+    with pytest.raises(InvalidRequestError, match="text-only"):
+        engine._prepare_vision_inputs(
+            [{"role": "user", "content": "hello"}],
+            **{"images": [], media: [object()]},
+        )
+
+
 @pytest.mark.asyncio
 @pytest.mark.skipif(not HAS_MLX, reason="mlx is required to import VLMBatchedEngine")
 @pytest.mark.parametrize("side_limit, expected_tokens", [(2048, 3072), (0, 11750)])
