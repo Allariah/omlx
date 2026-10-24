@@ -5142,17 +5142,13 @@ async def create_chat_completion(
             ms, native_reasoning=native_reasoning, chat_template_kwargs=merged_ct_kwargs
         )
 
-        # SpecPrefill: per-request overrides (fall back to model_settings)
+        # SpecPrefill: per-request overrides
         if request.specprefill is not None:
             chat_kwargs["specprefill"] = request.specprefill
         if request.specprefill_keep_pct is not None:
             chat_kwargs["specprefill_keep_pct"] = request.specprefill_keep_pct
-        elif _server_state.settings_manager and ms.specprefill_keep_pct is not None:
-            chat_kwargs["specprefill_keep_pct"] = ms.specprefill_keep_pct
         if getattr(request, "specprefill_threshold", None) is not None:
             chat_kwargs["specprefill_threshold"] = request.specprefill_threshold
-        elif _server_state.settings_manager and ms.specprefill_threshold is not None:
-            chat_kwargs["specprefill_threshold"] = ms.specprefill_threshold
 
         if request.stop:
             chat_kwargs["stop"] = request.stop

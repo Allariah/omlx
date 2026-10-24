@@ -2411,6 +2411,8 @@ class Scheduler:
         self._fixed_state_recorded: bool = False
         # SpecPrefill: draft model for attention-based sparse prefill
         self._specprefill_draft_model: Any | None = None
+        self._specprefill_default_keep_pct: float | None = None
+        self._specprefill_default_threshold: int | None = None
         self._draft_paged_ssd_cache_manager: Any | None = None
         self._draft_prefix_cache: Any | None = None
         # Track active specprefill request for RoPE cleanup
@@ -10750,7 +10752,11 @@ class Scheduler:
         )
 
     def set_specprefill_draft_model(
-        self, draft_model: Any, draft_model_name: str | None = None
+        self,
+        draft_model: Any,
+        draft_model_name: str | None = None,
+        keep_pct: float | None = None,
+        threshold: int | None = None,
     ) -> None:
         """Set the draft model for SpecPrefill scoring.
 
@@ -10762,6 +10768,8 @@ class Scheduler:
                 "Could not close the previous SpecPrefill draft SSD cache manager"
             )
         self._specprefill_draft_model = draft_model
+        self._specprefill_default_keep_pct = keep_pct
+        self._specprefill_default_threshold = threshold
         self._draft_prefix_cache = None
         if not draft_model_name:
             logger.info(
@@ -11326,8 +11334,8 @@ class Scheduler:
             cached_tokens=request.cached_tokens,
             requested_threshold=getattr(request, "_specprefill_threshold", None),
             requested_keep_pct=getattr(request, "_specprefill_keep_pct", None),
-            default_threshold=DEFAULT_THRESHOLD,
-            default_keep_pct=DEFAULT_KEEP_RATE,
+            default_threshold=self._specprefill_default_threshold or DEFAULT_THRESHOLD,
+            default_keep_pct=self._specprefill_default_keep_pct or DEFAULT_KEEP_RATE,
         )
         if plan is None:
             return

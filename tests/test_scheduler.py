@@ -5490,6 +5490,29 @@ class TestSpecPrefillCaches:
         finally:
             scheduler.shutdown()
 
+    def test_draft_settings_are_scoring_defaults(self, mock_model, mock_tokenizer):
+        scheduler = Scheduler(model=mock_model, tokenizer=mock_tokenizer)
+        try:
+            scheduler.set_specprefill_draft_model(
+                object(), keep_pct=0.4, threshold=100352
+            )
+            request = Request(
+                request_id="sp-defaults",
+                prompt=[1, 2, 3],
+                sampling_params=SamplingParams(max_tokens=8),
+            )
+            request.prompt_token_ids = [1, 2, 3]
+            request._specprefill_enabled = True
+            with patch(
+                "omlx.specprefill.policy.plan_specprefill_scoring", return_value=None
+            ) as plan:
+                scheduler._try_specprefill_scoring(request)
+
+            assert plan.call_args.kwargs["default_threshold"] == 100352
+            assert plan.call_args.kwargs["default_keep_pct"] == 0.4
+        finally:
+            scheduler.shutdown()
+
     def test_cache_counters_distinguish_target_static_and_draft_reuse(self):
         scheduler = Scheduler.__new__(Scheduler)
         scheduler.block_aware_cache = SimpleNamespace(
