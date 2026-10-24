@@ -90,7 +90,6 @@ from .api.anthropic_utils import (
     create_text_delta_event,
     create_thinking_delta_event,
     is_auto_mode_classifier_request,
-    tool_choice_is_none,
     map_finish_reason_to_stop_reason,
     request_has_cache_control,
 )
@@ -7746,10 +7745,9 @@ async def create_anthropic_message(
         ):
             merged_ct_kwargs["preserve_thinking"] = True
 
-        # Merge MCP tools with user-provided Anthropic tools. tool_choice
-        # {"type": "none"} keeps every tool out of the prompt, matching
-        # tool_choice="none" on /v1/chat/completions.
-        tools_disabled = tool_choice_is_none(request.tool_choice)
+        # Merge MCP tools with user-provided Anthropic tools unless
+        # tool_choice is {"type": "none"}, same as /v1/chat/completions.
+        tools_disabled = getattr(request.tool_choice, "type", None) == "none"
         user_internal = (
             None
             if tools_disabled
@@ -8032,7 +8030,7 @@ async def count_anthropic_tokens(
         # Convert tools if present; count them only when the model sees them.
         internal_tools = (
             None
-            if tool_choice_is_none(request.tool_choice)
+            if getattr(request.tool_choice, "type", None) == "none"
             else convert_anthropic_tools_to_internal(request.tools)
         )
 
