@@ -15,6 +15,7 @@ from mlx.utils import tree_flatten
 from ..patches.arrays_cache_metadata import apply_arrays_cache_metadata_patch
 from ..patches.mlx_vlm_minimax_m3_compat import adopt_expert_global_scales
 from ..patches.qwen35_yarn import apply_qwen35_yarn_patch, set_context_window
+from ..patches.raon1_mini import normalize_raon1_mini_model_file
 
 logger = logging.getLogger(__name__)
 
@@ -47,12 +48,7 @@ def ensure_model_code_trusted(
 ) -> None:
     """Reject a custom MLX architecture before any safetensors are opened."""
 
-    from ..patches.raon1_mini import is_vendored_model_file
-
     model_file = config.get("model_file")
-    if is_vendored_model_file(config):
-        # oMLX ships a reviewed copy; the remote module is never imported.
-        return
     if model_file is not None and not trust_remote_code:
         raise ValueError(
             f"The model at {model_path} requires importing and running a custom "
@@ -454,8 +450,6 @@ def _patch_mlx_lm_load_config() -> None:
     except ImportError:
         return
 
-    from ..patches.raon1_mini import normalize_raon1_mini_model_file
-
     _original = _lu.load_config
 
     def _patched(model_path, *args, **kwargs):
@@ -538,7 +532,7 @@ def maybe_apply_pre_load_patches(
     - Raon-1 mini RDA/MLA hybrid when ``config.json`` declares
       ``model_type == "raon1_mini"``. The checkpoint's ``model_file`` is
       served by the vendored ``mlx_lm.models.raon1_mini`` instead of being
-      imported, and NVFP4 experts keep their per-expert global scales.
+      imported.
     - Llama 4 attention offset patch when ``config.json`` declares
       ``model_type == "llama4"`` directly or under ``text_config``.
     - GLM-5.2 ``glm_moe_dsa`` patch (mlx-lm PR 1410) when ``config.json``

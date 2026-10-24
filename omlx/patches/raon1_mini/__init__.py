@@ -7,9 +7,6 @@ only imports under ``trust_remote_code``. oMLX vendors a reviewed copy of that
 module as ``mlx_lm.models.raon1_mini`` and, for the matching file name, drops
 ``model_file`` from the loaded config so mlx-lm resolves the vendored class by
 ``model_type`` instead of executing code from the model directory.
-
-The pinned mlx-lm also predates per-expert NVFP4 global scales
-(ml-explore/mlx-lm#1844); ``switch_compat`` backports them for this module.
 """
 
 from __future__ import annotations
@@ -33,17 +30,12 @@ _MODULE_NAME = f"mlx_lm.models.{MODEL_TYPE}"
 _APPLIED = False
 
 
-def is_vendored_model_file(config: dict[str, Any]) -> bool:
-    """True when ``config`` asks for the remote module oMLX ships itself."""
-    return (
-        config.get("model_type") == MODEL_TYPE
-        and config.get("model_file") == REMOTE_MODEL_FILE
-    )
-
-
 def normalize_raon1_mini_model_file(config: dict[str, Any]) -> dict[str, Any]:
     """Resolve Raon through the vendored module instead of the remote file."""
-    if is_vendored_model_file(config):
+    if (
+        config.get("model_type") == MODEL_TYPE
+        and config.get("model_file") == REMOTE_MODEL_FILE
+    ):
         config.pop("model_file")
     return config
 
@@ -63,10 +55,6 @@ def _register_module() -> None:
     sys.modules[_MODULE_NAME] = module
     try:
         spec.loader.exec_module(module)
-        from . import switch_compat
-
-        if switch_compat.install(module):
-            logger.info("Raon NVFP4 per-expert global scales backported")
         models_pkg = importlib.import_module("mlx_lm.models")
         setattr(models_pkg, MODEL_TYPE, module)
     except BaseException:
@@ -101,17 +89,11 @@ def apply_raon1_mini_patch() -> bool:
     return True
 
 
-def is_applied() -> bool:
-    return _APPLIED
-
-
 __all__ = [
     "MODEL_TYPE",
     "REMOTE_MODEL_FILE",
     "SOURCE_REPO",
     "SOURCE_REVISION",
     "apply_raon1_mini_patch",
-    "is_applied",
-    "is_vendored_model_file",
     "normalize_raon1_mini_model_file",
 ]
