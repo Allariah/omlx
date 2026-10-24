@@ -30,6 +30,7 @@ import functools
 import hashlib
 import importlib
 import inspect
+import itertools
 import json
 import logging
 import threading
@@ -3441,27 +3442,44 @@ class VLMBatchedEngine(BaseEngine):
                 formatted_messages.append({"role": role, "content": video_content})
             else:
                 prompt: Any = content
-                if (
-                    isinstance(raw_content, list)
-                    and msg_num_images > 0
-                    and msg_num_images
-                    == self._count_content_parts(raw_content, image_part_types)
-                ):
-                    # Hand mlx-vlm the parts in order so each image stays next
-                    # to its text; the flattened string puts every image first.
-                    prompt = []
-                    for item in raw_content:
-                        if not isinstance(item, dict):
-                            item = {
+                parts: list[dict] = []
+                if isinstance(raw_content, list):
+                    parts = [
+                        (
+                            item
+                            if isinstance(item, dict)
+                            else {
                                 "type": getattr(item, "type", ""),
                                 "text": getattr(item, "text", ""),
                             }
-                        if item.get("type") in image_part_types:
-                            prompt.append({"type": "image"})
-                        else:
-                            text = extract_text_from_content([item])
-                            if text:
-                                prompt.append({"type": "text", "text": text})
+                        )
+                        for item in raw_content
+                    ]
+                image_pos = [
+                    i for i, p in enumerate(parts) if p.get("type") in image_part_types
+                ][:msg_num_images]
+                # Text between images labels them, and flattening moves every
+                # image ahead of all text. Audio turns keep the flat layout
+                # because mlx-vlm keeps audio markers in the prefix.
+                if (
+                    msg_num_images > 1
+                    and msg_num_audios == 0
+                    and len(image_pos) == msg_num_images
+                    and extract_text_from_content(
+                        parts[image_pos[0] + 1 : image_pos[-1]]
+                    )
+                ):
+                    prompt = []
+                    for is_image, group in itertools.groupby(
+                        enumerate(parts),
+                        key=lambda ip: ip[1].get("type") in image_part_types,
+                    ):
+                        if is_image:
+                            prompt.extend(
+                                {"type": "image"} for i, _ in group if i in image_pos
+                            )
+                        elif text := extract_text_from_content([p for _, p in group]):
+                            prompt.append({"type": "text", "text": text})
                 formatted = get_message_json(
                     model_type,
                     prompt,
