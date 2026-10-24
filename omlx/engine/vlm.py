@@ -3433,9 +3433,31 @@ class VLMBatchedEngine(BaseEngine):
                         video_content.append({"type": "text", "text": item_text})
                 formatted_messages.append({"role": role, "content": video_content})
             else:
+                prompt: Any = content
+                if (
+                    isinstance(raw_content, list)
+                    and msg_num_images > 0
+                    and msg_num_images
+                    == self._count_content_parts(raw_content, image_part_types)
+                ):
+                    # Hand mlx-vlm the parts in order so each image stays next
+                    # to its text; the flattened string puts every image first.
+                    prompt = []
+                    for item in raw_content:
+                        if not isinstance(item, dict):
+                            item = {
+                                "type": getattr(item, "type", ""),
+                                "text": getattr(item, "text", ""),
+                            }
+                        if item.get("type") in image_part_types:
+                            prompt.append({"type": "image"})
+                        else:
+                            text = extract_text_from_content([item])
+                            if text:
+                                prompt.append({"type": "text", "text": text})
                 formatted = get_message_json(
                     model_type,
-                    content,
+                    prompt,
                     role,
                     skip_image_token=role != "user" or msg_num_images == 0,
                     skip_audio_token=role != "user" or msg_num_audios == 0,
