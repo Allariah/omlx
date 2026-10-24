@@ -4687,6 +4687,13 @@ def _build_model_sanitizer(
                 if has_vision:
                     # EmbeddingGemma 2 drops vision weights when vision_tower is None.
                     proxy.vision_tower = proxy.embed_vision = object()
+                if model_type == "diffusion_gemma":
+                    # DiffusionGemma drops vision weights unless
+                    # self.model.encoder.vision_tower is set.
+                    encoder_proxy = type("_EncoderProxy", (), {})()
+                    encoder_proxy.vision_tower = object() if has_vision else None
+                    proxy.model = type("_ModelProxy", (), {})()
+                    proxy.model.encoder = encoder_proxy
                 # Nested-VLM sanitizes (e.g. MiniMax-M3 minimax_m3_vl) read
                 # self.language_model.args.{num_hidden_layers,num_local_experts}
                 # for MoE expert stacking; expose text_config so proxy-based
