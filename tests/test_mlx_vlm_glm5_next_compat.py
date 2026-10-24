@@ -5083,7 +5083,7 @@ def _native_decode_indexer():
 
 def _pin_gpu_without_fused_decode(monkeypatch):
     # A GPU where _fast_short_select never serves one sequence's short rows,
-    # so _native_scores routes them off the padded tile.
+    # so _native_scores sends its decode rows to the decode scan.
     monkeypatch.setattr(dk, "fused_decode_supported", lambda: False)
 
 
@@ -5115,7 +5115,7 @@ def _forbid_padded_tile(monkeypatch, fast):
     )
 
 
-@pytest.mark.parametrize("pool_len,native", [(4095, False), (4096, True), (8199, True)])
+@pytest.mark.parametrize("pool_len,native", [(1023, False), (1024, True), (8199, True)])
 def test_glm5_next_decode_indexer_uses_fused_decode_scan(pool_len, native, monkeypatch):
     fast = _require_native_kernel("dsa_decode_scores")
     indexer, _ = _native_decode_indexer()
@@ -5132,18 +5132,20 @@ def test_glm5_next_decode_indexer_uses_fused_decode_scan(pool_len, native, monke
         _assert_matches_indexer_reference(actual, q, keys, weights)
 
 
-@pytest.mark.parametrize("rows,native", [(2, False), (31, False), (32, True)])
-def test_glm5_next_indexer_pads_to_the_tile_only_from_32_query_rows(
-    rows, native, monkeypatch
+@pytest.mark.parametrize(
+    "batch,rows,native", [(2, 2, False), (2, 31, False), (2, 32, True), (1, 25, True)]
+)
+def test_glm5_next_indexer_skips_the_tile_only_for_short_batched_queries(
+    batch, rows, native, monkeypatch
 ):
     fast = _require_native_kernel("dsa_indexer_scores")
     _pin_gpu_without_fused_decode(monkeypatch)
     indexer, _ = _native_decode_indexer()
     calls = _count_kernel_calls(monkeypatch, fast, "dsa_indexer_scores")
     mx.random.seed(61)
-    q = (mx.random.normal((1, rows, 32, 128)) * 0.5).astype(mx.bfloat16)
-    keys = (mx.random.normal((1, 4100, 128)) * 0.5).astype(mx.bfloat16)
-    weights = (mx.random.normal((1, rows, 32)) * 0.1).astype(mx.bfloat16)
+    q = (mx.random.normal((batch, rows, 32, 128)) * 0.5).astype(mx.bfloat16)
+    keys = (mx.random.normal((batch, 4100, 128)) * 0.5).astype(mx.bfloat16)
+    weights = (mx.random.normal((batch, rows, 32)) * 0.1).astype(mx.bfloat16)
     actual = indexer._native_scores(q, keys, weights)
     assert (actual is not None) is native
     assert len(calls) == int(native)
@@ -5191,20 +5193,20 @@ def _forbid_decode_scan(monkeypatch, fast):
 
 
 @pytest.mark.parametrize("rows,pool_len", [(1, 8192), (1, 100), (2, 8192), (31, 8192)])
-def test_glm5_next_indexer_without_the_decode_scan_never_pads_short_queries(
+def test_glm5_next_indexer_without_the_decode_scan_never_pads_short_batched_queries(
     rows, pool_len, monkeypatch
 ):
     from omlx.custom_kernels.sparse_index import fast
 
-    # Only the prefill tile is built: short queries still take the fallback.
+    # Only the prefill tile is built: short batched queries still take the fallback.
     _pin_gpu_without_fused_decode(monkeypatch)
     monkeypatch.setattr(fast, "has_symbol", lambda name: name == "dsa_indexer_scores")
     _forbid_padded_tile(monkeypatch, fast)
     _forbid_decode_scan(monkeypatch, fast)
     indexer, _ = _native_decode_indexer()
-    q = mx.zeros((1, rows, 32, 128), dtype=mx.bfloat16)
-    keys = mx.zeros((1, pool_len, 128), dtype=mx.bfloat16)
-    weights = mx.zeros((1, rows, 32), dtype=mx.bfloat16)
+    q = mx.zeros((2, rows, 32, 128), dtype=mx.bfloat16)
+    keys = mx.zeros((2, pool_len, 128), dtype=mx.bfloat16)
+    weights = mx.zeros((2, rows, 32), dtype=mx.bfloat16)
     assert indexer._native_scores(q, keys, weights) is None
 
 
@@ -5236,14 +5238,14 @@ def test_glm5_next_decode_scan_receives_the_kernel_call_shapes(monkeypatch):
     [
         (1, 1, True, "tile"),
         (1, 8, True, "tile"),
-        (1, 9, True, None),
+        (1, 9, True, "tile"),
         (2, 1, True, "scan"),
         (2, 4, True, None),
         (1, 1, False, "scan"),
-        (1, 8, False, None),
+        (1, 8, False, "tile"),
     ],
 )
-def test_glm5_next_indexer_keeps_the_tile_only_where_the_fused_selection_replays_it(
+def test_glm5_next_indexer_routes_short_queries(
     batch, rows, fused_gpu, route, monkeypatch
 ):
     from omlx.custom_kernels.sparse_index import fast

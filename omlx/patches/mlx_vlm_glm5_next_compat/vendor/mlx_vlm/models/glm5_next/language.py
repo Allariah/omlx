@@ -58,10 +58,8 @@ from .sparse_mla_decode import (
 
 logger = logging.getLogger(__name__)
 _NATIVE_INDEXER_WARNED = False
-# Pooled-key count from which the fused single-query decode scan replaces
-# the MLX matmul, the same key-count gate the GLM-5.x deepseek_v32 decode
-# path applies to this kernel; below it the two measure at parity.
-_NATIVE_DECODE_MIN_POOL = 4096
+# Smallest pool the native decode scan accepts (dsa_indexer.cpp).
+_NATIVE_DECODE_MIN_POOL = 1024
 
 
 # Causal row blocks of the dense-prefix attention (1 = one call).
@@ -900,20 +898,19 @@ class Glm5NextIndexer(nn.Module):
             # On M3 and newer GPUs _fast_short_select serves one sequence's
             # decode and verify rows (up to _DECODE_BLOCK) with scores that
             # replay this padded tile bit for bit, so for those shapes the
-            # tile stays this general path's exact reference. Every other
-            # short query (batched decode and verify, or any GPU without the
-            # fused path) skips the padding below.
+            # tile stays this general path's exact reference.
             fused_reference = (
                 q.shape[0] == 1
                 and q.shape[1] <= _DECODE_BLOCK
                 and _decode_kernels.fused_decode_supported()
             )
-            if q.shape[1] == 1 and not fused_reference:
+            if (
+                q.shape[1] == 1
+                and not fused_reference
+                and pool_keys.shape[1] >= _NATIVE_DECODE_MIN_POOL
+                and fast.has_symbol("dsa_decode_scores")
+            ):
                 # Decode should not pay for a 64-row prefill tile.
-                if pool_keys.shape[1] < _NATIVE_DECODE_MIN_POOL or not (
-                    fast.has_symbol("dsa_decode_scores")
-                ):
-                    return None
                 # The kernel assumes a unit-stride last axis at eval; its
                 # graph-time check cannot detect lazy transposed views. This
                 # guard can also copy capacity-backed and batched pool slices.
@@ -921,9 +918,11 @@ class Glm5NextIndexer(nn.Module):
                 return fast.dsa_decode_scores(
                     qt, keys, weights.reshape(weights.shape[0], self.n_heads)
                 )[:, 0]
-            if q.shape[1] < 32 and not fused_reference:
-                # Short multi-query chunks: the 64-row tile loses to the MLX
-                # matmul below roughly 32-48 rows on M3 Ultra.
+            if q.shape[0] > 1 and q.shape[1] < 32:
+                # Short batched chunks: the 64-row tile loses to the MLX
+                # matmul below roughly 32-48 rows on M3 Ultra. One sequence
+                # keeps the tile, whose fp32 head sum the bf16 chain does not
+                # match.
                 return None
             if not fast.has_symbol("dsa_indexer_scores"):
                 return None
