@@ -58,6 +58,7 @@ from .cache.pooling_delta import compact_pooling_cache_snapshot
 from .cache.prefix_cache import BlockAwarePrefixCache, cachelist_pm_member_plan
 from .decode_activity import get_decode_activity
 from .exceptions import (
+    InvalidRequestError,
     PrefillMemoryExceededError,
     describe_ceiling_binding,
     is_cache_corruption_error,
@@ -10707,6 +10708,12 @@ class Scheduler:
             else:
                 request.prompt_token_ids = list(request.prompt)
             request.num_prompt_tokens = len(request.prompt_token_ids)
+        # BatchGenerator.insert refuses an empty prompt inside step(), which
+        # fails every request on the engine.
+        if not request.prompt_token_ids:
+            raise InvalidRequestError(
+                "prompt must contain at least one token", field="prompt"
+            )
         self._resolve_generation_prompt_start(request)
         if self.moe_offload_stats is not None:
             request.moe_offload_start = self.moe_offload_stats()
