@@ -4432,6 +4432,10 @@ class EnginePool:
                 f"full model: {format_size(entry.estimated_size)}, "
                 f"total: {format_size(self._current_model_memory)})"
             )
+        except asyncio.CancelledError:
+            if not load_completed:
+                self._schedule_failed_load_reclaim(model_id, pre_load_memory)
+            raise
         except Exception as exc:
             # A failed load can leave tens of GB of just-loaded weights
             # reachable only through the propagating exception's traceback

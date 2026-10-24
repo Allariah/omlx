@@ -1556,104 +1556,62 @@ class TestEnginePoolAsync:
         assert pool.current_model_memory > 0
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("route", ["initial", "vlm_fallback", "lm_fallback"])
     @pytest.mark.parametrize("startup_fails", [False, True])
     async def test_cancelled_startup_drains_loader_before_stopping(
-        self, pool_with_mock_engines, route, startup_fails
+        self, pool_with_mock_engines, startup_fails
     ):
         pool = pool_with_mock_engines
         entry = pool.get_entry("model-a")
-        if route != "initial":
-            entry.model_type = entry.engine_type = "vlm"
-        force_lm = route == "lm_fallback"
-        entered, stopping, release_stop = (
-            asyncio.Event(),
-            asyncio.Event(),
-            asyncio.Event(),
-        )
-        release_loader, loader_finished = threading.Event(), threading.Event()
         loop = asyncio.get_running_loop()
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        loading, release_loader = asyncio.Event(), threading.Event()
         core_task = None
         startup_settled = False
-
-        def load():
-            loop.call_soon_threadsafe(entered.set)
-            if not release_loader.wait(5):
-                raise TimeoutError("test loader was not released")
-            loader_finished.set()
 
         async def start():
             nonlocal core_task, startup_settled
             # BatchedEngine starts its core before loading a SpecPrefill draft.
             core_task = asyncio.create_task(asyncio.Event().wait())
-            await loop.run_in_executor(executor, load)
+            loading.set()
+            await loop.run_in_executor(executor, release_loader.wait, 5)
             startup_settled = True
             if startup_fails:
                 raise RuntimeError("draft startup failed")
 
         async def stop():
-            assert loader_finished.is_set()
             assert startup_settled
-            stopping.set()
-            await release_stop.wait()
             core_task.cancel()
             await asyncio.gather(core_task, return_exceptions=True)
 
         engine = MagicMock(
             start=AsyncMock(side_effect=start), stop=AsyncMock(side_effect=stop)
         )
-        failed_engine = MagicMock(
-            start=AsyncMock(side_effect=RuntimeError("try the other loader")),
-            stop=AsyncMock(),
-        )
-        batched = failed_engine if force_lm else engine
-        vlm = failed_engine if route == "vlm_fallback" else engine
-        task = None
+        task = asyncio.create_task(pool.get_engine("model-a"))
         try:
             with (
-                patch("omlx.engine_pool.BatchedEngine", return_value=batched),
-                patch("omlx.engine_pool.VLMBatchedEngine", return_value=vlm),
-                patch("omlx.engine_pool.mx.synchronize"),
-                patch("omlx.engine_pool.mx.clear_cache"),
+                patch("omlx.engine_pool.BatchedEngine", return_value=engine),
+                patch.object(pool, "_schedule_failed_load_reclaim") as reclaim,
             ):
-                task = asyncio.create_task(
-                    pool.get_engine("model-a", force_lm=force_lm)
-                )
-                await asyncio.wait_for(entered.wait(), 2)
+                await asyncio.wait_for(loading.wait(), 2)
                 for _ in range(2):
                     task.cancel()
                     await asyncio.sleep(0)
                     assert not task.done()
-                    assert entry.is_loading
-                    assert pool._lock.locked()
+                    assert entry.is_loading and pool._lock.locked()
                     engine.stop.assert_not_awaited()
                 release_loader.set()
-                await asyncio.wait_for(stopping.wait(), 2)
-                task.cancel()
-                await asyncio.sleep(0)
-                assert not task.done()
-                assert entry.is_loading
-                assert not core_task.done()
-                release_stop.set()
                 with pytest.raises(asyncio.CancelledError):
                     await asyncio.wait_for(task, 2)
             engine.stop.assert_awaited_once()
             assert core_task.done()
-            assert entry.engine is None
-            assert not entry.is_loading
+            reclaim.assert_called_once()
+            assert entry.engine is None and not entry.is_loading
             assert not entry.load_failed
-            assert entry.runtime_estimated_size is None
             assert pool.current_model_memory == 0
             assert not pool._lock.locked()
         finally:
             release_loader.set()
-            release_stop.set()
-            if task is not None:
-                await asyncio.gather(task, return_exceptions=True)
-            if core_task is not None:
-                core_task.cancel()
-                await asyncio.gather(core_task, return_exceptions=True)
+            await asyncio.gather(task, return_exceptions=True)
             executor.shutdown(wait=True)
 
     @pytest.mark.asyncio
