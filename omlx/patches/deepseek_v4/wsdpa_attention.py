@@ -342,11 +342,13 @@ def wsdpa_topk_prefill(
     """
     global _broken, _topk_ready
     if not isinstance(offset, mx.array):
-        # Opt-in tensor-unit kernel (M5); None keeps the kernel below.
+        # M5 tensor-unit kernel; None keeps the kernel below. Its buffers fit
+        # the same low-memory profile, so a dispatch also proves the route.
         out = sparse_topk_attention_nax(
             q, kv, pooled, topk, sinks, scale, offset, window, ratio
         )
         if out is not None:
+            _topk_ready = True
             return out
     if isinstance(offset, mx.array) or _broken:
         return None

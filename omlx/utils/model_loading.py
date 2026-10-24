@@ -727,11 +727,6 @@ def maybe_apply_pre_load_patches(
 
         if apply_deepseek_v4_patch():
             logger.info("DeepSeek V4 pre-load patch applied for %s", model_name)
-        from ..patches.deepseek_v4 import sparse_attention_nax
-
-        sparse_attention_nax.configure(
-            bool(getattr(model_settings, "deepseek_v4_sparse_attention_nax", False))
-        )
 
     if model_type == "step3p7":
         from ..patches.step3p7 import apply_step3p7_patch

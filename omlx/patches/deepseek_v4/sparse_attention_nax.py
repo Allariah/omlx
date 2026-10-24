@@ -18,7 +18,7 @@ Versus ``dsv4_wsdpa_topk`` only the fp32 summation order differs (and the
 running maximum advances per 128-slot tile instead of per row), so outputs
 agree to bf16 rounding. A top-k row counts when ``idx < (p + 1) // ratio``;
 with the indexer's temporally sorted rows that is the native kernel's
-break-at-first-invisible rule. Opt in with ``OMLX_DSV4_SPARSE_ATTENTION_NAX=1``.
+break-at-first-invisible rule.
 """
 
 from __future__ import annotations
@@ -31,26 +31,11 @@ import mlx.core as mx
 
 logger = logging.getLogger(__name__)
 
-# Set from ``ModelSettings.deepseek_v4_sparse_attention_nax`` at model load
-# (``configure``); off by default.
-_ENABLED = False
-
 _D = 512
 _HEADS_PER_GROUP = 32
 # Short verify blocks stay on the native kernel.
 MIN_ROWS = 16
 
-
-def configure(enabled: bool, min_rows: int | None = None) -> None:
-    """Enable or disable the kernel for this process (called at model load)."""
-    global _ENABLED, MIN_ROWS, _BROKEN
-    _ENABLED = bool(enabled)
-    if min_rows is not None:
-        MIN_ROWS = int(min_rows)
-    _BROKEN = False
-    nax_sparse_attention_available.cache_clear()
-
-_COUNTS = {"nax": 0}
 _BROKEN = False
 _READY = False
 
@@ -369,19 +354,12 @@ def _kernel():
 
 @lru_cache(maxsize=1)
 def nax_sparse_attention_available() -> bool:
-    if not _ENABLED:
-        return False
     try:
         from omlx.custom_kernels.nax import is_nax_available
 
         return bool(is_nax_available())
     except Exception:  # noqa: BLE001
         return False
-
-
-def nax_dispatch_counts() -> dict[str, int]:
-    """Calls that ran the NAX kernel in this process."""
-    return dict(_COUNTS)
 
 
 def sparse_topk_attention_nax(
@@ -467,5 +445,4 @@ def sparse_topk_attention_nax(
             exc_info=True,
         )
         return None
-    _COUNTS["nax"] += 1
     return out[None]

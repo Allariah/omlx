@@ -33,22 +33,9 @@ pytestmark = pytest.mark.skipif(not _nax_hardware(), reason="needs M5 tensor uni
 
 @pytest.fixture
 def nax(monkeypatch):
-    # Upstream #4396 removed the OMLX_DSV4_WSDPA env switches and their
-    # module flags; only reset what the module still has.
-    for flag in ("_ENABLED", "_TOPK_ENABLED"):
-        if hasattr(wsdpa, flag):
-            monkeypatch.setattr(wsdpa, flag, True)
     monkeypatch.setattr(wsdpa, "_broken", False)
-
-    def set_enabled(enabled: bool, min_rows: int | None = None):
-        monkeypatch.setattr(nax_attn, "_ENABLED", enabled)
-        monkeypatch.setattr(nax_attn, "_BROKEN", False)
-        if min_rows is not None:
-            monkeypatch.setattr(nax_attn, "MIN_ROWS", min_rows)
-        nax_attn.nax_sparse_attention_available.cache_clear()
-
-    yield set_enabled
-    nax_attn.nax_sparse_attention_available.cache_clear()
+    monkeypatch.setattr(nax_attn, "_BROKEN", False)
+    return monkeypatch
 
 
 def _inputs(length, offset, window, pooled_len, ratio, topk_count, trim=0, seed=7):
@@ -100,15 +87,13 @@ def _exact(q, kv, pooled, topk, sinks, scale, offset, window, ratio):
     return out
 
 
-def _both(nax, args, min_rows=None):
-    nax(False)
-    native = wsdpa.wsdpa_topk_prefill(*args)
-    nax(True, min_rows)
-    before = nax_attn.nax_dispatch_counts()["nax"]
-    got = wsdpa.wsdpa_topk_prefill(*args)
+def _both(nax, args):
+    with nax.context() as m:
+        m.setattr(wsdpa, "sparse_topk_attention_nax", lambda *a: None)
+        native = wsdpa.wsdpa_topk_prefill(*args)
+    got = nax_attn.sparse_topk_attention_nax(*args)
     assert native is not None and got is not None
     mx.eval(native, got)
-    assert nax_attn.nax_dispatch_counts()["nax"] == before + 1
     assert got.shape == native.shape and got.dtype == mx.bfloat16
     return np.array(native.astype(mx.float32))[0], np.array(got.astype(mx.float32))[0]
 
@@ -161,13 +146,13 @@ def test_small_case_from_wsdpa_suite(nax):
         [[0, 1, 2], [0, 1, 2], [0, 1, 2], [0, 1, 3], [1, 2, 3], [1, 2, 4]],
         dtype=mx.uint32,
     )[None]
-    native, got = _both(nax, tuple(args), min_rows=1)
+    nax.setattr(nax_attn, "MIN_ROWS", 1)
+    native, got = _both(nax, tuple(args))
     _assert_close(got, native, _exact(*args))
 
 
 def test_deterministic(nax):
     args = _inputs(48, 3000, 128, 800, 4, 512, seed=9)
-    nax(True)
     first = nax_attn.sparse_topk_attention_nax(*args)
     second = nax_attn.sparse_topk_attention_nax(*args)
     mx.eval(first, second)
@@ -175,7 +160,6 @@ def test_deterministic(nax):
 
 
 def test_unsupported_inputs_stay_native(nax):
-    nax(True)
     q, kv, pooled, topk, sinks, scale, offset, window, ratio = _inputs(
         32, 1000, 128, 600, 4, 512
     )
@@ -187,10 +171,3 @@ def test_unsupported_inputs_stay_native(nax):
         call(q.astype(mx.float16), kv, pooled, topk, sinks, scale, offset, window, ratio)
         is None
     )
-    nax(False)
-    assert call(q, kv, pooled, topk, sinks, scale, offset, window, ratio) is None
-
-
-def test_disabled_by_default(nax):
-    nax(False)
-    assert not nax_attn.nax_sparse_attention_available()
