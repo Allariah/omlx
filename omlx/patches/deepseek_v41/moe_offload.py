@@ -37,7 +37,8 @@ from .storage import SAFETENSORS_NUMPY_DTYPES, decode_array
 _PROJECTIONS = ("w1", "w3", "w2")
 _FLOAT_BYTES = {"BF16": 2, "F16": 2, "F32": 4}
 # Host bytes one residency update may hold in flight before the serial slot
-# writes drain them (about 32 oQ3e experts).
+# writes drain them (about 32 oQ3e experts). A prefill read-ahead holds up to
+# the same amount through a chunk's eval.
 INFLIGHT_BYTES = 512 * 1024 * 1024
 # Expert reads get their own pool: the Engram page pool runs long sequential
 # page touches that would otherwise queue ahead of a layer's misses.
@@ -45,49 +46,6 @@ EXPERT_IO_WORKERS = 24
 _EXPERT_IO_POOL = ThreadPoolExecutor(
     max_workers=EXPERT_IO_WORKERS, thread_name_prefix="v41-expert-io"
 )
-
-# Decode submits each chunk's output with ``mx.async_eval`` so the next
-# layer's expert reads overlap live GPU work instead of idling it. The
-# submission queue is a pipeline of finite depth, so an unbounded deferral
-# would eventually block inside a later submit; the routed path keeps its own
-# count instead and retires the oldest output when the count reaches it. The
-# value is a bound, not a tuned optimum: the unretired outputs are
-# decode-shaped (a few rows each), so the depth costs no meaningful memory,
-# and retiring one is the only place the CPU waits.
-#
-# Only *when* the CPU waits moves: Metal executes one stream in submission
-# order, so a later slot write still lands after the read it replaces.
-DECODE_ASYNC_DEPTH = 6
-
-
-class _InFlight:
-    """Decode's outstanding ``async_eval`` submissions, bounded to the pipeline.
-
-    One instance at module scope: ``OffloadedExpert`` exists per layer while
-    the bound is per stream, and the layer loop runs on one scheduler thread.
-    """
-
-    def __init__(self, depth=DECODE_ASYNC_DEPTH):
-        self.depth = depth
-        self.pending = []
-
-    def submit(self, out):
-        """Hand ``out`` to the GPU without waiting for it to retire."""
-        if self.depth <= 0:
-            mx.eval(out)
-            return
-        if len(self.pending) >= self.depth:
-            mx.eval(self.pending.pop(0))
-        mx.async_eval(out)
-        self.pending.append(out)
-
-    def drain(self):
-        """Synchronously retire every in-flight submission."""
-        while self.pending:
-            mx.eval(self.pending.pop(0))
-
-
-_DECODE_INFLIGHT = _InFlight()
 
 # One positional read: a whole tensor, or one leading-axis row of it.
 Slab = namedtuple("Slab", "key expert fd offset nbytes dtype shape")
@@ -389,8 +347,8 @@ class ExpertOffloadPlan:
         """Release the shard descriptors.
 
         Reads in flight must have drained: the engine closes a model after its
-        executor is idle, and ``ensure_ids`` waits for every read it started
-        before it returns or raises.
+        executor is idle, and ``ensure_ids`` and ``_sorted`` wait for every
+        read they started before they return or raise.
         """
         with self._lock:
             self._closed = True
@@ -437,7 +395,7 @@ class _ExpertSlots:
         runs, its install is the same slot write, and its bytes land in the
         same ``fetched_bytes`` ledger. The window is the same ``INFLIGHT_BYTES``
         bound ``ensure_ids`` enforces, and carried entries count against it
-        when that call consumes them, so this adds no peak memory.
+        when that call consumes them. Those bytes stay alive through the eval.
 
         Entries no later call consumes are dropped by ``release_read_ahead``,
         which a prefill's ``finally`` always runs.
@@ -582,13 +540,7 @@ class OffloadedExpert(nn.Module):
         return mx.concatenate(outputs, axis=0).reshape(*indices.shape, 1, x.shape[-1])
 
     def _routed(self, x, indices, weights, input_quantized):
-        """Per-token top-k routes: bound each chunk by its route count.
-
-        Each chunk's output is submitted with ``mx.async_eval`` so the next
-        layer's expert reads overlap live GPU work instead of idling it. The
-        outputs are the same arrays either way; only when the CPU waits for
-        them moves.
-        """
+        """Per-token top-k routes: bound each chunk by its route count."""
         flat_i = indices.reshape(-1, indices.shape[-1])
         flat_x = x.reshape(-1, 1, 1, x.shape[-1])
         flat_w = None if weights is None else weights.reshape(flat_i.shape)
@@ -604,8 +556,10 @@ class OffloadedExpert(nn.Module):
                 sorted_indices=False,
                 input_quantized=input_quantized,
             )
+            # No wait here: the next ``ensure`` syncs on its routing ids, and the
+            # GPU runs this chunk while the rest of the layer is built.
+            mx.async_eval(out)
             outputs.append(out)
-            _DECODE_INFLIGHT.submit(out)
         return outputs
 
     @staticmethod
@@ -640,9 +594,7 @@ class OffloadedExpert(nn.Module):
         try:
             while start < len(ids):
                 end = self._chunk_end(ids, start, capacity)
-                slots = mx.array(
-                    self.slots.ensure_ids(ids[start:end]), dtype=mx.int32
-                )
+                slots = mx.array(self.slots.ensure_ids(ids[start:end]), dtype=mx.int32)
                 order = mx.argsort(slots)
                 inverse = mx.argsort(order)
                 out = self.slots.expert(
