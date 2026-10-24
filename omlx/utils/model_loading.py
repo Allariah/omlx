@@ -47,7 +47,12 @@ def ensure_model_code_trusted(
 ) -> None:
     """Reject a custom MLX architecture before any safetensors are opened."""
 
+    from ..patches.raon1_mini import is_vendored_model_file
+
     model_file = config.get("model_file")
+    if is_vendored_model_file(config):
+        # oMLX ships a reviewed copy; the remote module is never imported.
+        return
     if model_file is not None and not trust_remote_code:
         raise ValueError(
             f"The model at {model_path} requires importing and running a custom "
@@ -449,6 +454,8 @@ def _patch_mlx_lm_load_config() -> None:
     except ImportError:
         return
 
+    from ..patches.raon1_mini import normalize_raon1_mini_model_file
+
     _original = _lu.load_config
 
     def _patched(model_path, *args, **kwargs):
@@ -462,6 +469,7 @@ def _patch_mlx_lm_load_config() -> None:
         normalize_laguna_compressed_quant(cfg)
         normalize_bailing_hybrid_fp8_quant(cfg)
         normalize_mimo_mxfp4_quant(cfg)
+        normalize_raon1_mini_model_file(cfg)
         return cfg
 
     _lu.load_config = _patched
@@ -527,6 +535,10 @@ def maybe_apply_pre_load_patches(
     - Ling 3.0 Flash mixed MLA/KDA model when ``config.json`` declares
       ``model_type == "bailing_hybrid"``. The vendored module is registered
       as ``mlx_lm.models.bailing_hybrid`` before mlx-lm resolves its classes.
+    - Raon-1 mini RDA/MLA hybrid when ``config.json`` declares
+      ``model_type == "raon1_mini"``. The checkpoint's ``model_file`` is
+      served by the vendored ``mlx_lm.models.raon1_mini`` instead of being
+      imported, and NVFP4 experts keep their per-expert global scales.
     - Llama 4 attention offset patch when ``config.json`` declares
       ``model_type == "llama4"`` directly or under ``text_config``.
     - GLM-5.2 ``glm_moe_dsa`` patch (mlx-lm PR 1410) when ``config.json``
@@ -739,6 +751,12 @@ def maybe_apply_pre_load_patches(
 
         if apply_bailing_hybrid_patch():
             logger.info("Ling 3.0 Flash pre-load patch applied for %s", model_name)
+
+    if model_type == "raon1_mini":
+        from ..patches.raon1_mini import apply_raon1_mini_patch
+
+        if apply_raon1_mini_patch():
+            logger.info("Raon-1 mini pre-load patch applied for %s", model_name)
 
     if model_type == "laguna":
         # MLX-LM dynamically imports the architecture and tokenizer-configured
