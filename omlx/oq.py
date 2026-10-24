@@ -4508,6 +4508,9 @@ def _build_model_sanitizer(
         A function that takes a dict of weights and returns sanitized weights,
         or None if the model class can't be loaded.
     """
+    from omlx.utils.model_loading import normalize_qwen35_text_config
+
+    normalize_qwen35_text_config(config)
     if _is_muse_spark(config):
         return muse_spark_layout.sanitizer(config, text_only=text_only)
     if config.get("model_type") == "flint":

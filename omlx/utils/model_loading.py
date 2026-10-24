@@ -312,6 +312,14 @@ def expand_glm_moe_dsa_fused_quant_keys(cfg: dict) -> dict:
     return cfg
 
 
+def normalize_qwen35_text_config(cfg: dict) -> dict:
+    """Use mlx-lm's Qwen3.5 names for text-only Hugging Face checkpoints."""
+    model_type = cfg.get("model_type")
+    if model_type in ("qwen3_5_text", "qwen3_5_moe_text"):
+        cfg["model_type"] = model_type.removesuffix("_text")
+    return cfg
+
+
 def normalize_hy_v3_rope_config(cfg: dict) -> dict:
     """Adapt legacy Hy-MT2 RoPE settings to mlx-lm's ``hy_v3`` schema.
 
@@ -445,6 +453,7 @@ def _patch_mlx_lm_load_config() -> None:
 
     def _patched(model_path, *args, **kwargs):
         cfg = _original(model_path, *args, **kwargs)
+        normalize_qwen35_text_config(cfg)
         normalize_hy_v3_rope_config(cfg)
         # Cluster ranks load MiniMax through mlx-lm, not the patched mlx-vlm.
         adopt_expert_global_scales(cfg)
@@ -627,6 +636,8 @@ def maybe_apply_pre_load_patches(
             "Could not read %s for pre-load patch dispatch: %s", config_path, e
         )
         return
+
+    normalize_qwen35_text_config(config)
 
     # Bonsai t5 load patch must run FIRST — before any other patch that wraps
     # load_weights on a model subclass (e.g. mlx_vlm_mtp qwen35_vlm_runtime).
