@@ -1012,6 +1012,9 @@ def apply_qwen35_verify_sdpa_split_patch() -> bool:
         )
 
     q35_lang._qwen3_5_left_padded_attention = patched_target_verify_attention
+    if _m1_gpu():
+        # Read the core count at load time; system_profiler takes ~0.2s.
+        _m1_gpu_cores()
     _PATCHED = True
     logger.info("Qwen3.5/3.6 verify-width causal vector attention patch applied")
     return True

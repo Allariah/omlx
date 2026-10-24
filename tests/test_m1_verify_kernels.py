@@ -36,7 +36,7 @@ def _quantized(k, n, bits, group_size, dtype, seed=0):
 @pytest.mark.parametrize("bits,rows", [(4, 2), (4, 3), (4, 4), (5, 2), (5, 3)])
 @pytest.mark.parametrize("group_size", [64, 128])
 @pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
-def test_matches_fp32_reference(qmv_only, bits, rows, group_size, dtype):
+def test_qmv_matches_fp32_reference(qmv_only, bits, rows, group_size, dtype):
     K, N = 2048, 1024
     w, scales, biases = _quantized(K, N, bits, group_size, dtype)
     x = mx.random.normal((rows, K)).astype(dtype)
@@ -71,7 +71,7 @@ def test_row_and_shape_gating(qmv_only):
     assert not m1_verify_qmv.eligible(2, 2048, 1024, 4, 64, mx.float32)
 
 
-def test_disabled_by_env(qmv_off):
+def test_qmv_disabled_when_the_gate_is_off(qmv_off):
     assert not m1_verify_qmv.eligible(2, 2048, 1024, 4, 64, mx.float16)
     assert qwen35_verify_qmm._verify_route(4, 5120, 17408, 4, 64, mx.float16) == "sg8"
 
@@ -127,7 +127,7 @@ def mma_on(monkeypatch):
 @pytest.mark.parametrize("rows", [5, 7, 8, 9, 13, 16])
 @pytest.mark.parametrize("n", [1024, 4096])
 @pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
-def test_matches_fp32_reference(mma_on, rows, n, dtype):
+def test_mma_matches_fp32_reference(mma_on, rows, n, dtype):
     k = 2048
     mx.random.seed(rows + n)
     w, scales, biases = mx.quantize(

@@ -25,7 +25,7 @@ so 4-bit routes up to 4 rows and 5-bit up to 3; deeper verifies keep sg8.
 
 Numerics: fp32 accumulation, per-group ``scale * sum(x*q) + bias * sum(x)``
 like qmv. Rows are not bit-identical to the one-row decode (same class as the
-other verify kernels); ``OMLX_MTP_ROW_EXACT_VERIFY`` models never get here.
+other verify kernels); row-exact verify models never get here.
 
 Gating: applegpu_g13 only (where it was measured).
 """
