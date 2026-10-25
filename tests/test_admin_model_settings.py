@@ -52,6 +52,18 @@ def _write_qwen4_mtp_checkpoint(tmp_path, *, embedded_mtp: bool) -> None:
     )
 
 
+def _write_minimax_m3_checkpoint(tmp_path, *, dspark: bool) -> None:
+    config = {"model_type": "minimax_m3_vl", "text_config": {"num_hidden_layers": 60}}
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    if dspark:
+        draft = tmp_path / "dspark"
+        draft.mkdir()
+        (draft / "config.json").write_text(
+            json.dumps({"architectures": ["DSparkMiniMaxDraftModel"]})
+        )
+        (draft / "model-dspark-00001.safetensors").write_bytes(b"")
+
+
 async def _update_settings(
     pool: EnginePool,
     settings: ModelSettings,
@@ -621,6 +633,43 @@ async def test_qwen4_mtp_setting_rejects_nextn_only_layout(tmp_path):
 
     assert exc_info.value.status_code == 400
     assert "native nextn layers are not supported" in exc_info.value.detail
+    assert settings.mtp_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_minimax_m3_mtp_setting_accepts_bundled_dspark(tmp_path):
+    _write_minimax_m3_checkpoint(tmp_path, dspark=True)
+    pool, entry = _failed_pool()
+    entry.model_path = str(tmp_path)
+    entry.config_model_type = "minimax_m3_vl"
+    settings = ModelSettings()
+
+    await _update_settings(
+        pool,
+        settings,
+        admin_routes.ModelSettingsRequest(mtp_enabled=True),
+    )
+
+    assert settings.mtp_enabled is True
+
+
+@pytest.mark.asyncio
+async def test_minimax_m3_mtp_setting_rejects_missing_dspark(tmp_path):
+    _write_minimax_m3_checkpoint(tmp_path, dspark=False)
+    pool, entry = _failed_pool()
+    entry.model_path = str(tmp_path)
+    entry.config_model_type = "minimax_m3_vl"
+    settings = ModelSettings()
+
+    with pytest.raises(admin_routes.HTTPException) as exc_info:
+        await _update_settings(
+            pool,
+            settings,
+            admin_routes.ModelSettingsRequest(mtp_enabled=True),
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "no bundled dspark/ draft" in exc_info.value.detail
     assert settings.mtp_enabled is False
 
 
