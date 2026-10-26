@@ -51,6 +51,11 @@ from .engine.splash import (
 from .engine.splash import (
     scan_ssd_cache as scan_splash_ssd_cache,
 )
+from .engine.strata import (
+    StrataEngine,
+    find_strata_binary,
+    resolve_strata_target,
+)
 from .engine.sts import STSEngine
 from .engine.stt import STTEngine
 from .engine.tts import TTSEngine
@@ -610,13 +615,19 @@ class EnginePool:
         base = self._entry_resident_size(entry) if base_size is None else base_size
         if self._distributed_deployment_for_entry(entry) is not None:
             return base
-        if self.external_engine_id(entry.model_id, runtime_settings):
+        engine_id = self.external_engine_id(entry.model_id, runtime_settings)
+        if engine_id == "splash":
             # Splash plans its own budget; none of the MLX reservations apply.
             target, _ = self.splash_target(entry.model_id, runtime_settings)
             if target is not None:
                 wanted = self._splash_wanted_bytes(entry, runtime_settings, target)
                 limit = self._splash_admission_target()
                 return min(wanted, limit) if limit > 0 else wanted
+        elif engine_id:
+            # Another external engine owns its process. Do not apply Splash's
+            # budget or the in-process MLX reservations. The memory contract
+            # (what to count before the child reports a plan) is later work.
+            return base
         qwen4_offload, _, qwen4_estimate = self._qwen4_ple_offload_status(
             entry, runtime_settings, log_decision=log_decision
         )
@@ -2238,28 +2249,55 @@ class EnginePool:
             )
         return min(room, wanted)
 
-    async def _check_splash_launcher(
+    def _selected_external_settings(
         self, model_id: str, runtime_settings: object | None
-    ) -> None:
-        """Run the launcher check off the event loop when a model uses Splash.
-
-        The first look at a launcher runs it to read its version.
-        """
+    ) -> object | None:
         settings = runtime_settings
         if settings is None and self._settings_manager is not None:
             get_settings = getattr(self._settings_manager, "get_settings", None)
             if callable(get_settings):
                 settings = get_settings(model_id)
-        if self.external_engine_id(model_id, settings):
-            await asyncio.to_thread(
-                find_splash_binary, get_global_settings().integrations.splash_path
-            )
+        return settings
+
+    async def _check_external_launcher(
+        self, model_id: str, runtime_settings: object | None
+    ) -> None:
+        """Run the selected launcher's version check off the event loop.
+
+        The first look at a launcher runs it, or reads BUILD.json beside it.
+        """
+        settings = self._selected_external_settings(model_id, runtime_settings)
+        engine_id = self.external_engine_id(model_id, settings)
+        if engine_id not in ("splash", "strata"):
+            return
+        integrations = get_global_settings().integrations
+        if engine_id == "splash":
+            await asyncio.to_thread(find_splash_binary, integrations.splash_path)
+        else:
+            await asyncio.to_thread(find_strata_binary, integrations.strata_path)
+
+    async def _check_splash_launcher(
+        self, model_id: str, runtime_settings: object | None
+    ) -> None:
+        """Backward-compatible name for the external-launcher check."""
+        await self._check_external_launcher(model_id, runtime_settings)
 
     async def external_engine_problem(
         self, model_id: str, model_settings: object | None
     ) -> str:
-        """Why no external engine can serve ``model_id``; empty when one can."""
-        await self._check_splash_launcher(model_id, model_settings)
+        """Why the selected external engine cannot serve ``model_id``.
+
+        Empty when none is selected, or when the selected one can serve it.
+        """
+        engine_id = self.external_engine_id(model_id, model_settings)
+        if not engine_id:
+            return ""
+        if engine_id not in EXTERNAL_ENGINES:
+            return f"Unknown external engine '{engine_id}'"
+        await self._check_external_launcher(model_id, model_settings)
+        if engine_id == "strata":
+            _, reason = self.strata_target(model_id, model_settings)
+            return reason
         _, reason = self.splash_target(model_id, model_settings)
         return reason
 
@@ -2268,23 +2306,38 @@ class EnginePool:
     ) -> str | None:
         """The external engine that serves ``model_id``, else None.
 
-        A GGUF, which no in-process engine loads, falls back to the default
-        external engine when its settings pick none.
+        A GGUF, which no in-process engine loads, still defaults to Splash.
+        Strata accepts different files and is selected explicitly.
         """
         engine_id = getattr(model_settings, "external_engine", None)
         if engine_id:
             return engine_id
         entry = self._entries.get(model_id)
-        if entry is not None and entry.model_format == "gguf":
-            return next(iter(EXTERNAL_ENGINES))
+        if entry is not None and entry.model_format == "gguf" and "splash" in EXTERNAL_ENGINES:
+            return "splash"
         return None
+
+    def strata_target(
+        self, model_id: str, model_settings: object | None
+    ) -> tuple[object | None, str]:
+        """Whether Strata can serve ``model_id``, and with what; else why not."""
+        del model_settings
+        entry = self._entries.get(model_id)
+        if entry is None:
+            return None, f"Model '{model_id}' not found"
+        if entry.engine_type not in ("batched", "vlm"):
+            return None, "Strata serves language models only"
+        return resolve_strata_target(
+            entry.model_path,
+            get_global_settings().integrations.strata_path,
+        )
 
     def _external_engine_for(
         self,
         entry: EngineEntry,
         model_settings: object | None,
         effective_type: str,
-    ) -> SplashEngine | None:
+    ) -> BaseEngine | None:
         """The external engine the model's settings select, else None.
 
         A model that cannot run on its selected engine fails to load with the
@@ -2298,9 +2351,40 @@ class EnginePool:
                 entry.model_id, f"Unknown external engine '{engine_id}'"
             )
         if effective_type not in ("batched", "vlm"):
+            label = EXTERNAL_ENGINES[engine_id]
             raise ModelLoadingError(
-                entry.model_id, "Splash serves language models only"
+                entry.model_id, f"{label} serves language models only"
             )
+        if engine_id == "strata":
+            return self._strata_engine_for(entry, model_settings)
+        return self._splash_engine_for(entry, model_settings)
+
+    def _strata_engine_for(
+        self, entry: EngineEntry, model_settings: object | None
+    ) -> StrataEngine:
+        target, reason = self.strata_target(entry.model_id, model_settings)
+        if target is None:
+            raise ModelLoadingError(
+                entry.model_id,
+                f"Strata cannot serve '{entry.model_id}': {reason}",
+            )
+        logger.info(
+            "Serving %s through Strata %s (%s)",
+            entry.model_id,
+            target.binary.version,
+            target.binary.path,
+        )
+        settings = get_global_settings()
+        return StrataEngine(
+            model_name=entry.model_path,
+            model_id=entry.model_id,
+            target=target,
+            log_dir=settings.logging.get_log_dir(settings.base_path) / "strata",
+        )
+
+    def _splash_engine_for(
+        self, entry: EngineEntry, model_settings: object | None
+    ) -> SplashEngine:
         target, reason = self.splash_target(entry.model_id, model_settings)
         if target is None:
             raise ModelLoadingError(
@@ -2366,13 +2450,23 @@ class EnginePool:
             ),
         )
 
+    @staticmethod
+    def _external_process_engine(engine: object) -> bool:
+        """True when ``engine`` is a supervised external process.
+
+        Dispatch is the engine id, so a second engine is counted without
+        another Splash-only branch.
+        """
+        engine_id = getattr(engine, "external_engine_id", None)
+        return isinstance(engine_id, str) and engine_id in EXTERNAL_ENGINES
+
     def external_process_memory_bytes(self) -> int:
-        """Memory held by models that run in their own processes (Splash)."""
+        """Memory held by models that run in their own processes."""
         engines = [entry.engine for entry in list(self._entries.values())]
         engines += list(self._starting_external.values())
         total = 0
         for engine in engines:
-            if not isinstance(engine, SplashEngine):
+            if not self._external_process_engine(engine):
                 continue
             try:
                 total += engine.process_memory_bytes()
@@ -3728,8 +3822,8 @@ class EnginePool:
 
         logger.info(f"Unloading model: {model_id} (immediate abort)")
         distributed = self._distributed_deployment_for_entry(entry) is not None
-        # Splash, like cluster ranks, holds its memory in its own process.
-        external = distributed or isinstance(entry.engine, SplashEngine)
+        # An external engine, like cluster ranks, holds its memory in its own process.
+        external = distributed or self._external_process_engine(entry.engine)
         resident_size = self._entry_resident_size(entry)
         settle_size = (
             entry.runtime_settle_size
@@ -4010,9 +4104,9 @@ class EnginePool:
     @staticmethod
     async def _start_engine(engine) -> None:
         """Drain startup before stopping an engine whose acquisition was cancelled."""
-        if isinstance(engine, SplashEngine):
-            # Splash stops its subprocess when readiness is cancelled; do not
-            # defer that cleanup until its startup timeout expires.
+        if EnginePool._external_process_engine(engine):
+            # The child stops when readiness is cancelled; do not defer that
+            # cleanup until its startup timeout expires.
             await engine.start()
             return
         task = asyncio.create_task(engine.start())
@@ -4272,14 +4366,14 @@ class EnginePool:
                         prefill_eviction_callback=prefill_eviction_callback,
                     )
 
-            if isinstance(engine, SplashEngine):
+            if self._external_process_engine(engine):
                 self._starting_external[model_id] = engine
             try:
                 await self._start_engine(engine)
             except Exception as start_error:
-                if isinstance(engine, SplashEngine):
-                    # start() already stopped Splash; its error carries the
-                    # tail of the Splash log. There is no MLX fallback.
+                if self._external_process_engine(engine):
+                    # start() already stopped the child; its error carries the
+                    # tail of the log. There is no MLX fallback.
                     raise
                 if force_lm and entry.engine_type == "vlm":
                     # force_lm created a BatchedEngine but mlx-lm can't
@@ -4381,10 +4475,16 @@ class EnginePool:
                 )
 
             self._validate_llm_engine_ready(model_id, engine)
-            if isinstance(engine, SplashEngine) and engine.reserved_bytes() > 0:
-                # Splash may grow into the whole budget it planned, so the
+            reserved = (
+                engine.reserved_bytes()
+                if self._external_process_engine(engine)
+                and callable(getattr(engine, "reserved_bytes", None))
+                else 0
+            )
+            if reserved > 0:
+                # The child may grow into the whole budget it planned, so the
                 # pool counts that instead of the weights estimate.
-                resident_size = engine.reserved_bytes()
+                resident_size = reserved
                 entry.runtime_estimated_size = resident_size
                 entry.runtime_settle_size = resident_size
             entry.engine = engine
@@ -4535,8 +4635,8 @@ class EnginePool:
 
             post_load_memory = max(mx.get_active_memory(), get_phys_footprint())
             observed_delta = max(0, post_load_memory - pre_load_memory)
-            if isinstance(engine, SplashEngine):
-                # The weights live in the Splash process, not this one.
+            if self._external_process_engine(engine):
+                # The weights live in the child process, not this one.
                 observed_delta = 0
             entry.actual_size = observed_delta or resident_size
 
@@ -4711,9 +4811,9 @@ class EnginePool:
             deployment = self._distributed_deployment_for_entry(e)
             actual_size = e.actual_size
             external_engine = None
-            if isinstance(e.engine, SplashEngine):
-                # Report the live footprint of the Splash process group.
-                external_engine = "splash"
+            if self._external_process_engine(e.engine):
+                # Report the live footprint of the child process group.
+                external_engine = e.engine.external_engine_id
                 actual_size = e.engine.process_memory_bytes() or actual_size
             models.append(
                 {

@@ -1324,7 +1324,7 @@
                                     <i data-lucide="cpu" class="w-4 h-4 text-neutral-500"></i>
                                     <span class="text-xs font-bold uppercase tracking-wider text-neutral-600">{{ t('settings.integrations.external_engines.section_label') }}</span>
                                 </div>
-                                <span class="badge bg-neutral-200 text-neutral-600 border-neutral-300">Splash</span>
+                                <span class="badge bg-neutral-200 text-neutral-600 border-neutral-300">Splash · Strata</span>
                             </div>
                             <div class="px-4 sm:px-6 py-3 border-b border-neutral-100">
                                 <p class="text-xs text-neutral-500">{{ t('settings.integrations.external_engines.description') }}</p>
@@ -1446,6 +1446,55 @@
                                                       x-text="formatSizeBytes(m.memory_bytes) + ' / ' + formatSizeBytes(m.memory_budget_bytes)"></span>
                                             </div>
                                             <p class="text-neutral-400 font-mono break-all mt-0.5" x-text="m.log_path"></p>
+                                        </div>
+                                    </template>
+                                </div>
+                                <!-- Strata launcher: detected path, or a path to enter -->
+                                <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 px-4 sm:px-6 py-4">
+                                    <div class="min-w-0">
+                                        <label class="text-sm text-neutral-700">{{ t('settings.integrations.strata.binary') }}</label>
+                                        <template x-if="globalSettings.external_engines.strata.available && !strataPath.editing">
+                                            <div>
+                                                <p class="text-xs text-neutral-500 mt-1 font-mono break-all" x-text="globalSettings.external_engines.strata.path"></p>
+                                                <p class="text-xs text-neutral-400 mt-0.5"
+                                                   x-text="globalSettings.external_engines.strata.auto_detected ? window.t('settings.integrations.strata.detected_hint') : window.t('settings.integrations.strata.configured_hint')"></p>
+                                            </div>
+                                        </template>
+                                        <template x-if="!globalSettings.external_engines.strata.available || strataPath.editing">
+                                            <div>
+                                                <p class="text-xs text-neutral-400 mt-0.5">{{ t('settings.integrations.strata.binary_hint') }}</p>
+                                                <p x-show="!globalSettings.external_engines.strata.available && globalSettings.external_engines.strata.reason"
+                                                   class="text-xs text-amber-700 mt-1 break-words"
+                                                   x-text="globalSettings.external_engines.strata.reason"></p>
+                                            </div>
+                                        </template>
+                                        <p x-show="strataPath.error" x-cloak class="text-xs text-red-500 mt-1 break-words" x-text="strataPath.error"></p>
+                                    </div>
+                                    <template x-if="globalSettings.external_engines.strata.available && !strataPath.editing">
+                                        <div class="flex items-center gap-2 shrink-0">
+                                            <span class="text-xs font-medium text-neutral-600"
+                                                  x-text="globalSettings.external_engines.strata.label + ' ' + globalSettings.external_engines.strata.version"></span>
+                                            <button type="button" @click="editStrataPath()"
+                                                    class="px-4 py-2 text-sm font-medium border border-neutral-200 rounded-full hover:bg-neutral-50 transition-colors shrink-0">{{ t('settings.integrations.strata.change') }}</button>
+                                        </div>
+                                    </template>
+                                    <template x-if="!globalSettings.external_engines.strata.available || strataPath.editing">
+                                        <div class="flex flex-wrap items-center gap-2 shrink-0">
+                                            <input type="text" x-model="strataPath.draft"
+                                                   @keydown.enter="applyStrataPath(strataPath.draft)"
+                                                   placeholder="strata"
+                                                   class="px-3 py-2 text-sm border border-neutral-200 rounded-lg font-mono w-64">
+                                            <button type="button"
+                                                    @click="applyStrataPath(strataPath.draft)"
+                                                    :disabled="strataPath.saving || !strataPath.draft.trim()"
+                                                    class="px-4 py-2 text-sm font-medium border border-neutral-200 rounded-full hover:bg-neutral-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shrink-0">{{ t('settings.integrations.strata.apply') }}</button>
+                                            <button type="button" x-show="globalSettings.integrations.strata_path"
+                                                    @click="applyStrataPath('')"
+                                                    :disabled="strataPath.saving"
+                                                    class="px-4 py-2 text-sm font-medium border border-neutral-200 rounded-full hover:bg-neutral-50 transition-colors disabled:opacity-50 shrink-0">{{ t('settings.integrations.strata.use_auto') }}</button>
+                                            <button type="button" x-show="strataPath.editing"
+                                                    @click="strataPath.editing = false; strataPath.error = ''"
+                                                    class="px-4 py-2 text-sm font-medium text-neutral-500 rounded-full hover:bg-neutral-50 transition-colors shrink-0">{{ t('settings.integrations.strata.cancel') }}</button>
                                         </div>
                                     </template>
                                 </div>

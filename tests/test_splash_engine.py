@@ -1657,7 +1657,10 @@ class TestAdminAPI:
             with pytest.raises(HTTPException):
                 await _post_global(settings, **fields)
 
-    def test_global_settings_report_the_detected_launcher(self, tmp_path, launchers):
+    def test_global_settings_report_the_detected_launcher(
+        self, tmp_path, launchers, monkeypatch
+    ):
+        monkeypatch.setattr("omlx.engine.strata._find_launcher", lambda name: None)
         launcher = launchers("splash")
 
         def pool_not_ready():
@@ -1697,8 +1700,9 @@ class TestAdminAPI:
         assert (saved.external_engine, saved.temperature) == ("splash", 0.5)
 
     def test_model_list_reports_engine_compatibility(
-        self, tmp_path, launchers, global_settings
+        self, tmp_path, launchers, global_settings, monkeypatch
     ):
+        monkeypatch.setattr("omlx.engine.strata._find_launcher", lambda name: None)
         launchers("splash")
         pool, entry = _pool(tmp_path)
 
@@ -1707,21 +1711,23 @@ class TestAdminAPI:
             for info in pool.get_status()["models"]
         }
 
-        assert rows[entry.model_id] == [
-            {
-                "id": "splash",
-                "label": "Splash",
-                "compatible": True,
-                "reason": "",
-                "draft_repo": None,
-            }
-        ]
+        assert rows[entry.model_id][0] == {
+            "id": "splash",
+            "label": "Splash",
+            "compatible": True,
+            "reason": "",
+            "draft_repo": None,
+        }
+        assert rows[entry.model_id][1]["id"] == "strata"
+        assert rows[entry.model_id][1]["label"] == "Strata"
+        assert rows[entry.model_id][1]["draft_repo"] is None
         assert rows["Qwen3.8-27B-DFlash2"] == []
 
         # Without its draft the model names the repo that provides it.
         del pool._entries["Qwen3.8-27B-DFlash2"]
         info = pool.get_status()["models"][0]
-        (row,) = admin_routes._external_engines_for_model(pool, info, None)
+        rows = admin_routes._external_engines_for_model(pool, info, None)
+        row = next(item for item in rows if item["id"] == "splash")
         assert not row["compatible"]
         assert row["draft_repo"] == "incoai/Qwen3.8-27B-DFlash2"
 
@@ -1731,7 +1737,8 @@ class TestAdminAPI:
         del config["quantization"]
         (bf16 / "config.json").write_text(json.dumps(config))
         entry.model_path = str(bf16)
-        (row,) = admin_routes._external_engines_for_model(pool, info, None)
+        rows = admin_routes._external_engines_for_model(pool, info, None)
+        row = next(item for item in rows if item["id"] == "splash")
         assert row["draft_repo"] is None
 
 

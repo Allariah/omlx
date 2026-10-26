@@ -974,6 +974,8 @@ class IntegrationSettings:
     splash_max_memory_gb: float | None = None  # None = what the ceiling leaves
     splash_ssd_cache_gb: float | None = None  # None = oMLX's SSD cache size
     splash_ane_prefill: bool = True
+    # Empty: search PATH, Homebrew, and ~/.local/bin for the Strata terminal.
+    strata_path: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
@@ -1005,6 +1007,7 @@ class IntegrationSettings:
             "splash_max_memory_gb": self.splash_max_memory_gb,
             "splash_ssd_cache_gb": self.splash_ssd_cache_gb,
             "splash_ane_prefill": self.splash_ane_prefill,
+            "strata_path": self.strata_path,
         }
 
     @classmethod
@@ -1046,6 +1049,7 @@ class IntegrationSettings:
             splash_max_memory_gb=data.get("splash_max_memory_gb"),
             splash_ssd_cache_gb=data.get("splash_ssd_cache_gb"),
             splash_ane_prefill=data.get("splash_ane_prefill", True),
+            strata_path=data.get("strata_path") or None,
         )
 
 

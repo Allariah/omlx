@@ -55,6 +55,11 @@ from ..engine.splash import (
 from ..engine.splash import (
     scan_ssd_cache as scan_splash_ssd_cache,
 )
+from ..engine.strata import (
+    STRATA_INSTALL_HINT,
+    find_strata_binary,
+    inspect_strata_binary,
+)
 from ..exceptions import ModelBusyError
 from ..model_discovery import (
     REASONING_EFFORT_LEVELS,
@@ -804,6 +809,8 @@ class GlobalSettingsRequest(BaseModel):
     splash_max_memory_gb: float | None = None
     splash_ssd_cache_gb: float | None = None
     splash_ane_prefill: bool | None = None
+    # Empty path means automatic detection of the Strata terminal.
+    strata_path: str | None = None
 
     # UI settings
     ui_language: str | None = None
@@ -976,29 +983,45 @@ def _dflash_compat_for_model(model_info: dict) -> tuple[bool, str]:
     return dflash_compatibility(model_type, model_info.get("engine_type"))
 
 
+def _engine_compatibility(engine_pool, engine_id: str, model_info: dict, settings):
+    """Whether ``engine_id`` can serve this model, why not, and any draft repo."""
+    model_id = model_info["id"]
+    if engine_id == "splash":
+        target, reason = engine_pool.splash_target(model_id, settings)
+        draft_repo = (
+            engine_pool.splash_draft_to_download(model_id, settings)
+            if target is None
+            else None
+        )
+        return target is not None, reason, draft_repo
+    if engine_id == "strata":
+        target, reason = engine_pool.strata_target(model_id, settings)
+        return target is not None, reason, None
+    return False, f"Unknown external engine '{engine_id}'", None
+
+
 def _external_engines_for_model(engine_pool, model_info: dict, settings) -> list[dict]:
     """Each external engine and whether it can serve this model."""
     if model_info.get("engine_type") not in ("batched", "vlm"):
         return []
     if model_info.get("is_helper"):
         return []
-    target, reason = engine_pool.splash_target(model_info["id"], settings)
-    draft_repo = (
-        engine_pool.splash_draft_to_download(model_info["id"], settings)
-        if target is None
-        else None
-    )
-    return [
-        {
-            "id": engine_id,
-            "label": label,
-            "compatible": target is not None,
-            "reason": reason,
-            # The draft the engine needs that a download provides.
-            "draft_repo": draft_repo,
-        }
-        for engine_id, label in EXTERNAL_ENGINES.items()
-    ]
+    rows = []
+    for engine_id, label in EXTERNAL_ENGINES.items():
+        compatible, reason, draft_repo = _engine_compatibility(
+            engine_pool, engine_id, model_info, settings
+        )
+        rows.append(
+            {
+                "id": engine_id,
+                "label": label,
+                "compatible": compatible,
+                "reason": reason,
+                # The draft the engine needs that a download provides.
+                "draft_repo": draft_repo,
+            }
+        )
+    return rows
 
 
 def _entry_is_diffusion_model(entry) -> bool:
@@ -3223,10 +3246,14 @@ async def update_model_settings(
                 raise HTTPException(
                     status_code=400, detail=f"Unknown external engine: {engine_id}"
                 )
-            target, reason = await asyncio.to_thread(
-                engine_pool.splash_target, model_id, current_settings
+            compatible, reason, _draft = await asyncio.to_thread(
+                _engine_compatibility,
+                engine_pool,
+                engine_id,
+                {"id": model_id},
+                current_settings,
             )
-            if target is None:
+            if not compatible:
                 raise HTTPException(status_code=400, detail=reason)
         current_settings.external_engine = engine_id
     # DFlash settings
@@ -4550,6 +4577,9 @@ async def get_global_settings(is_admin: bool = Depends(require_admin)):
     await asyncio.to_thread(
         find_splash_binary, global_settings.integrations.splash_path
     )
+    await asyncio.to_thread(
+        find_strata_binary, global_settings.integrations.strata_path
+    )
     return _global_settings_response(global_settings)
 
 
@@ -4598,6 +4628,56 @@ def _splash_status(global_settings) -> dict:
         "reason": reason,
         "install_hint": SPLASH_INSTALL_HINT,
         "models": models,
+    }
+
+
+def _strata_status(global_settings) -> dict:
+    """The Strata launcher oMLX would run, and the models it serves now."""
+    binary, reason = find_strata_binary(global_settings.integrations.strata_path)
+    models = []
+    try:
+        engine_pool = _get_engine_pool() if _get_engine_pool is not None else None
+    except HTTPException:
+        engine_pool = None
+    entries = getattr(engine_pool, "_entries", None) or {}
+    for model_id, entry in list(entries.items()):
+        engine = getattr(entry, "engine", None)
+        if getattr(engine, "external_engine_id", None) != "strata":
+            continue
+        stats = engine.get_stats()
+        models.append(
+            {
+                "id": model_id,
+                "memory_bytes": stats.get("process_memory_bytes"),
+                "log_path": stats.get("log_path"),
+            }
+        )
+    return {
+        "available": binary is not None,
+        "path": str(binary.path) if binary else None,
+        "auto_detected": binary.auto_detected if binary else None,
+        "version": binary.version if binary else None,
+        "label": binary.label if binary else None,
+        "reason": reason,
+        "install_hint": STRATA_INSTALL_HINT,
+        "models": models,
+    }
+
+
+def _external_engine_status(global_settings, engine_id: str) -> dict:
+    if engine_id == "splash":
+        return _splash_status(global_settings)
+    if engine_id == "strata":
+        return _strata_status(global_settings)
+    return {
+        "available": False,
+        "path": None,
+        "auto_detected": None,
+        "version": None,
+        "label": EXTERNAL_ENGINES.get(engine_id),
+        "reason": f"Unknown external engine '{engine_id}'",
+        "install_hint": "",
+        "models": [],
     }
 
 
@@ -4766,8 +4846,12 @@ def _global_settings_response(global_settings):
             "splash_max_memory_gb": global_settings.integrations.splash_max_memory_gb,
             "splash_ssd_cache_gb": global_settings.integrations.splash_ssd_cache_gb,
             "splash_ane_prefill": global_settings.integrations.splash_ane_prefill,
+            "strata_path": global_settings.integrations.strata_path,
         },
-        "external_engines": {"splash": _splash_status(global_settings)},
+        "external_engines": {
+            engine_id: _external_engine_status(global_settings, engine_id)
+            for engine_id in EXTERNAL_ENGINES
+        },
         "system": {
             "total_memory_bytes": memory_info["total_bytes"],
             "total_memory": memory_info["total_formatted"],
@@ -5688,6 +5772,20 @@ async def update_global_settings(
         global_settings.integrations.splash_ane_prefill = bool(
             request.splash_ane_prefill
         )
+        integrations_changed = True
+    if "strata_path" in request.model_fields_set:
+        strata_path = (request.strata_path or "").strip() or None
+        # Check only a new path: the web UI resends every integration field,
+        # and a launcher removed later must not block unrelated saves.
+        if strata_path and strata_path != global_settings.integrations.strata_path:
+            binary, reason = await asyncio.to_thread(
+                inspect_strata_binary,
+                Path(strata_path).expanduser(),
+                auto_detected=False,
+            )
+            if binary is None:
+                raise HTTPException(status_code=400, detail=reason)
+        global_settings.integrations.strata_path = strata_path
         integrations_changed = True
     if "markitdown_enabled" in request.model_fields_set:
         global_settings.integrations.markitdown_enabled = bool(

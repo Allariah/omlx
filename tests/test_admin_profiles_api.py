@@ -73,6 +73,9 @@ class _FakePool:
     def splash_draft_to_download(self, model_id, model_settings):
         return None
 
+    def strata_target(self, model_id, model_settings):
+        return None, "Strata is not installed"
+
     @staticmethod
     def _clear_load_failure(entry):
         entry.load_failed = False

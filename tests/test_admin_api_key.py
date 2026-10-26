@@ -23,6 +23,8 @@ class TestListModelsSettings:
         """Ensure list_models response includes all ModelSettings fields."""
         mock_engine_pool = MagicMock()
         mock_engine_pool.splash_target.return_value = (None, "")
+        mock_engine_pool.strata_target.return_value = (None, "Strata is not installed")
+        mock_engine_pool.splash_draft_to_download.return_value = None
         mock_engine_pool.get_status.return_value = {
             "models": [
                 {
@@ -200,6 +202,8 @@ class TestListModelsSettings:
 
         mock_engine_pool = MagicMock()
         mock_engine_pool.splash_target.return_value = (None, "")
+        mock_engine_pool.strata_target.return_value = (None, "Strata is not installed")
+        mock_engine_pool.splash_draft_to_download.return_value = None
         mock_engine_pool.get_status.return_value = {
             "models": [
                 {

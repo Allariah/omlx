@@ -201,9 +201,11 @@
                     splash_max_memory_gb: null,
                     splash_ssd_cache_gb: null,
                     splash_ane_prefill: true,
+                    strata_path: null,
                 },
                 external_engines: {
                     splash: { available: false, path: null, auto_detected: null, version: null, label: null, reason: '', install_hint: '', models: [] },
+                    strata: { available: false, path: null, auto_detected: null, version: null, label: null, reason: '', install_hint: '', models: [] },
                 },
                 ui: { language: 'en', dashboard_layout: null },
                 idle_timeout: { idle_timeout_seconds: null },
@@ -214,6 +216,7 @@
             webSearchTest: { running: false, ok: null, message: '' },
             // Splash launcher path row: manual entry when not detected or changed
             splashPath: { editing: false, draft: '', error: '', saving: false },
+            strataPath: { editing: false, draft: '', error: '', saving: false },
             splashOptionsError: '',
             // Claude Desktop gateway profile state (macOS auto-config)
             claudeDesktop: { configured: false, working: false, message: '' },
@@ -4403,6 +4406,7 @@
                             splash_max_memory_gb: this.globalSettings.integrations.splash_max_memory_gb,
                             splash_ssd_cache_gb: this.globalSettings.integrations.splash_ssd_cache_gb,
                             splash_ane_prefill: this.globalSettings.integrations.splash_ane_prefill,
+                            strata_path: this.globalSettings.integrations.strata_path,
                         }),
                     });
                     if (!response.ok) {
@@ -4515,6 +4519,30 @@
                     this.loadModels();
                 }
                 this.splashPath.saving = false;
+            },
+
+            editStrataPath() {
+                const strata = this.globalSettings.external_engines.strata;
+                this.strataPath.draft = this.globalSettings.integrations.strata_path || strata.path || '';
+                this.strataPath.error = '';
+                this.strataPath.editing = true;
+            },
+
+            async applyStrataPath(path) {
+                this.strataPath.saving = true;
+                this.strataPath.error = '';
+                const previous = this.globalSettings.integrations.strata_path;
+                this.globalSettings.integrations.strata_path = (path || '').trim() || null;
+                const error = await this.saveIntegrationSettings();
+                if (error) {
+                    this.globalSettings.integrations.strata_path = previous;
+                    this.strataPath.error = error;
+                } else {
+                    this.strataPath.editing = false;
+                    await this.loadGlobalSettings();
+                    this.loadModels();
+                }
+                this.strataPath.saving = false;
             },
 
             ddgsBackendChecked(name) {
