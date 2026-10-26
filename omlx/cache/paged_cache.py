@@ -1580,7 +1580,7 @@ class PagedCacheManager(CacheManager):
                 return False
 
             if block.is_null:
-                logger.warning(f"Cannot mark null block")
+                logger.warning("Cannot mark null block")
                 return False
 
             # In paged SSD-only mode, data is already on paged SSD
@@ -1623,7 +1623,7 @@ class PagedCacheManager(CacheManager):
                 return False
 
             if block.is_null:
-                logger.warning(f"Cannot evict null block")
+                logger.warning("Cannot evict null block")
                 return False
 
             # Remove from hash cache
