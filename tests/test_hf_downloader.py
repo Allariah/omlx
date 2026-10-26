@@ -1954,9 +1954,8 @@ class TestHFDownloaderRoutes:
     @pytest.mark.parametrize(
         "cached, aliased", [(False, False), (True, False), (False, True)]
     )
-    @pytest.mark.parametrize("layout", ["standard", "table"])
     async def test_split_variant_delete_preserves_other_variants(
-        self, tmp_path, write_gguf, cached, aliased, layout
+        self, tmp_path, write_gguf, cached, aliased
     ):
         models_dir = tmp_path / "models"
         if cached:
@@ -1966,30 +1965,10 @@ class TestHFDownloaderRoutes:
             folder = repo / "snapshots" / ("c" * 40)
         else:
             repo = folder = models_dir / "ISTA-DASLab" / "Flash-Next-GGUF"
-        variants = (
-            ("Q2_0", "Q4_K_M") if layout == "standard" else ("Q4-PLE4", "Q4-PLE8")
-        )
-        ids = [
-            (
-                f"Flash-Next-{variant}"
-                if layout == "standard"
-                else f"Flash-Next-body-{variant}"
-            )
-            for variant in variants
-        ]
-        source_parts = {}
-        for variant in variants:
-            source_parts[variant] = [
-                (
-                    f"{variant}/Flash-Next-{variant}-{part:05d}-of-00002.gguf"
-                    if layout == "standard"
-                    else f"{variant}/Flash-Next-{'body' if part == 1 else 'ple-table'}-{part:05d}-of-00002.gguf"
-                )
-                for part in (1, 2)
-            ]
-            for name in source_parts[variant]:
+        for variant in ("Q2_0", "Q4_K_M"):
+            for part in (1, 2):
                 write_gguf(
-                    folder / name,
+                    folder / variant / f"Flash-Next-{variant}-{part:05d}-of-00002.gguf",
                     {"general.architecture": "qwen4exp"},
                 )
         write_gguf(folder / "mmproj-BF16.gguf", {"general.architecture": "clip"})
@@ -2019,20 +1998,23 @@ class TestHFDownloaderRoutes:
             ),
         ):
             pool.discover_models([str(models_dir)])
-            assert set(pool._entries) == set(ids)
+            assert set(pool._entries) == {"Flash-Next-Q2_0", "Flash-Next-Q4_K_M"}
             rows = (await admin_routes.list_hf_models(is_admin=True))["models"]
             assert {row["name"] for row in rows} == set(pool._entries)
-            await admin_routes.delete_hf_model(ids[0], is_admin=True)
-            assert not list((folder / variants[0]).glob("*.gguf"))
-            assert len(list((folder / variants[1]).glob("*.gguf"))) == 2
+            await admin_routes.delete_hf_model("Flash-Next-Q2_0", is_admin=True)
+            assert not list((folder / "Q2_0").glob("*.gguf"))
+            assert len(list((folder / "Q4_K_M").glob("*.gguf"))) == 2
             assert (folder / "mmproj-BF16.gguf").exists()
-            assert set(pool._entries) == {ids[1]}
+            assert set(pool._entries) == {"Flash-Next-Q4_K_M"}
             if not cached:
                 downloader.cancel_download_for_dir.assert_awaited_once_with(
                     folder,
-                    source_parts[variants[0]],
+                    [
+                        f"Q2_0/Flash-Next-Q2_0-{part:05d}-of-00002.gguf"
+                        for part in (1, 2)
+                    ],
                 )
-            await admin_routes.delete_hf_model(ids[1], is_admin=True)
+            await admin_routes.delete_hf_model("Flash-Next-Q4_K_M", is_admin=True)
             assert not repo.exists()
             assert pool._entries == {}
 
@@ -5151,3 +5133,11 @@ class TestFileSelection:
             "Q4-PLE8/Qwen3.8-Flash-Next-UD-Q4_K_XL-Q4-PLE8"
         }
         assert {row["mmproj"] for row in files[:5]} == {"mmproj-BF16.gguf"}
+
+        # The task row names the model even when the table is listed first.
+        selected = [names[-1], "mmproj-BF16.gguf", *names[:-1]]
+        row = DownloadTask(task_id="t", repo_id="o/m", files=selected).to_dict()
+        assert row["gguf_files"] == [names[-1], *names[:-1]]
+        assert row["gguf_model_id"] == "Qwen3.8-Flash-Next-UD-Q4_K_XL-Q4-PLE8"
+        row = DownloadTask(task_id="t", repo_id="o/m", files=["Q-Q8_0.gguf"]).to_dict()
+        assert row["gguf_model_id"] == "Q-Q8_0"

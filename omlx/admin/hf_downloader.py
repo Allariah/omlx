@@ -468,6 +468,7 @@ class DownloadTask:
 
     def to_dict(self) -> dict:
         """Serialize task to a JSON-compatible dict."""
+        models = gguf.model_ids(self.files or [])
         return {
             "task_id": self.task_id,
             "repo_id": self.repo_id,
@@ -483,6 +484,8 @@ class DownloadTask:
             "completed_at": self.completed_at,
             "retry_count": self.retry_count,
             "files": self.files,
+            "gguf_files": list(models),
+            "gguf_model_id": next(iter(models.values()), None),
         }
 
     @classmethod

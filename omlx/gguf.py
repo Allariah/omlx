@@ -203,6 +203,23 @@ def split_file_groups(names: list[str]) -> dict[str, str]:
     return groups
 
 
+def model_ids(names: list[str]) -> dict[str, str]:
+    """Map the GGUF model files among repo paths to the ID each serves under."""
+    groups = split_file_groups(names)
+    ids: dict[str, str] = {}
+    for name in names:
+        if name in groups:
+            ids[name] = groups[name].rsplit("/", 1)[-1]
+        elif (
+            "/" not in name
+            and not name.startswith(".")
+            and name.lower().endswith(".gguf")
+            and file_kind(name) == "gguf"
+        ):
+            ids[name] = name[: -len(".gguf")]
+    return ids
+
+
 def _variant_ggufs(folder: Path) -> list[Path]:
     try:
         variants = sorted(path for path in folder.iterdir() if path.is_dir())

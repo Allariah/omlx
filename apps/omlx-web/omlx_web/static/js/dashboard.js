@@ -7786,31 +7786,14 @@
                 }
             },
 
-            // A GGUF model file: at the repo root or split in its VARIANT/ folder.
-            isGgufModelFile(name) {
-                const lower = name.toLowerCase();
-                if (!lower.endsWith('.gguf') || lower.includes('mmproj')) return false;
-                const [folder, base, ...rest] = lower.split('/');
-                if (base === undefined) return true;
-                const split = base.match(/^(.+)-\d{5}-of-\d{5}\.gguf$/);
-                return !rest.length && !folder.startsWith('.') && !!split
-                    && (split[1].endsWith(`-${folder}`) || /^(?:ud-)?[a-z0-9_]+-ple\d+$/.test(folder));
-            },
-
             // The GGUF model files a task fetches, shown beside its repo.
             taskGgufFiles(task) {
-                return (task.files || []).filter(name => this.isGgufModelFile(name)).join(', ');
+                return (task.gguf_files || []).join(', ');
             },
 
-            // The model ID a finished GGUF download serves under.
+            // The model ID a finished download serves under.
             taskModelId(task) {
-                const files = (task.files || []).filter(f => this.isGgufModelFile(f));
-                const name = files.find(f => /-00001-of-\d{5}\.gguf$/i.test(f)) || files[0];
-                if (!name) return task.repo_id.split('/').pop();
-                const parts = name.split('/');
-                const prefix = parts.pop().replace(/(-\d{5}-of-\d{5})?\.gguf$/i, '');
-                return parts.length && !prefix.toLowerCase().endsWith(`-${parts[0].toLowerCase()}`)
-                    ? `${prefix}-${parts[0]}` : prefix;
+                return task.gguf_model_id || task.repo_id.split('/').pop();
             },
 
             // Every download picks its files in the detail modal first.
