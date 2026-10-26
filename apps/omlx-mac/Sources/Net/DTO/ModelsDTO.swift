@@ -72,6 +72,8 @@ struct ModelDTO: Codable, Equatable, Sendable, Identifiable {
     var deepseekV41EngramResidentBytes: Int64? = nil
     var deepseekV41EngramMmapBytes: Int64? = nil
     var moeExpertOffloadSupported: Bool? = nil
+    /// True on M1/M2 for checkpoints that still carry bfloat16 leaves.
+    var activationFp16Supported: Bool? = nil
     /// True for families whose MTP draft head stays resident while experts stream.
     var moeOffloadAllowsMtp: Bool? = nil
     /// True when this Mac can run the Qwen INT8 activation prefill kernels.
@@ -128,6 +130,7 @@ struct ModelSettingsDTO: Codable, Equatable, Sendable {
     let enableThinking: Bool?
     let qwen4PleSsdOffload: Bool?
     var qwen4GdnDecodeWideProj: Bool? = nil
+    var activationFp16Enabled: Bool? = nil
     var deepseekV41EngramSsdOffload: Bool? = nil
     var deepseekV41CedPrefillEnabled: Bool? = nil
     let thinkingBudgetEnabled: Bool?
@@ -223,6 +226,7 @@ struct ModelSettingsPatch: Encodable, Equatable, Sendable {
     var enableThinking: Bool?? = nil // nil omits the key. .some(nil) sends JSON null.
     var qwen4PleSsdOffload: Bool? = nil
     var qwen4GdnDecodeWideProj: Bool? = nil
+    var activationFp16Enabled: Bool? = nil
     var deepseekV41EngramSsdOffload: Bool? = nil
     var deepseekV41CedPrefillEnabled: Bool? = nil
     var thinkingBudgetEnabled: Bool? = nil

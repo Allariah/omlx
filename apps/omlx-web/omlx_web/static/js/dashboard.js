@@ -2155,6 +2155,8 @@
                         String(model?.config_model_type || '').toLowerCase().replaceAll('-', '_') === 'deepseek_v41',
                     qwen4_gdn_decode_wide_proj:
                         s.qwen4_gdn_decode_wide_proj === true,
+                    activation_fp16_enabled: s.activation_fp16_enabled === true,
+                    activation_fp16_supported: model?.activation_fp16_supported === true,
                     qwen4_gdn_decode_wide_proj_supported:
                         String(model?.config_model_type || '').toLowerCase().replaceAll('-', '_') === 'qwen4_exp',
                     deepseek_v41_engram_ssd_offload: model?.deepseek_v41_engram_ssd_offload_forced === true
@@ -3197,6 +3199,7 @@
                         !!ms.deepseek_v41_ced_prefill_enabled,
                     qwen4_gdn_decode_wide_proj:
                         !!ms.qwen4_gdn_decode_wide_proj,
+                    activation_fp16_enabled: !!ms.activation_fp16_enabled,
                     deepseek_v41_engram_ssd_offload:
                         ms.deepseek_v41_engram_ssd_offload_forced
                             ? !!ms.deepseek_v41_engram_ssd_offload_requested

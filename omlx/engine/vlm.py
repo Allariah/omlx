@@ -33,7 +33,6 @@ import inspect
 import itertools
 import json
 import logging
-import os
 import threading
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -2321,36 +2320,21 @@ class VLMBatchedEngine(BaseEngine):
 
         # Materialize lazy buffers (RoPE freqs, vision/audio towers) on the
         # loader thread so per-engine inference threads can read them (#1304).
-        from ..utils.model_loading import materialize_lazy_state
+        from ..utils.model_loading import (
+            apply_activation_fp16,
+            materialize_lazy_state,
+        )
 
         await loop.run_in_executor(
             get_mlx_executor(), materialize_lazy_state, self._vlm_model
         )
 
-        # Native-fp16 activations. Off by default; OMLX_ACT_FP16=1 forces it on
-        # for a one-off A/B without touching persisted settings.
-        if os.environ.get("OMLX_ACT_FP16") == "1" or getattr(
-            self._model_settings, "activation_fp16_enabled", False
-        ):
-            try:
-                from ..utils.model_loading import cast_bf16_params_to_fp16
-
-                recast = await loop.run_in_executor(
-                    get_mlx_executor(), cast_bf16_params_to_fp16, self._vlm_model
-                )
-                if recast:
-                    logger.info(
-                        "activation dtype: bfloat16 -> float16 (%d tensors)", recast
-                    )
-                else:
-                    logger.info(
-                        "activation dtype: already float16 or better; nothing to recast"
-                    )
-            except Exception:
-                logger.warning(
-                    "fp16 activation recast failed; staying on bfloat16",
-                    exc_info=True,
-                )
+        await loop.run_in_executor(
+            get_mlx_executor(),
+            apply_activation_fp16,
+            self._vlm_model,
+            self._model_settings,
+        )
 
         # t5 ternary: free unused bias tensors to recover ~420 MB RAM.
         # The repacked safetensors carries 2-bit biases for format compat;

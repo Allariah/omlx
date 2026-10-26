@@ -39,7 +39,7 @@ final class ModelSettingsScreenVM {
         case temperature, topP, topK, minP
         case repetitionPenalty, presencePenalty, ttl
         case enableThinking, ssdNgramOffload
-        case deepseekV41CedPrefill, qwen4GdnDecodeWideProj
+        case deepseekV41CedPrefill, qwen4GdnDecodeWideProj, activationFp16
         case thinkingBudgetEnabled, thinkingBudgetTokens
         case limitToolResults, toolResultLimitTokens
         case limitGpuPower, gpuPowerLimitWatts
@@ -265,6 +265,7 @@ final class ModelSettingsScreenVM {
     var deepseekV41EngramSsdOffloadForced: Bool = false
     var deepseekV41CedPrefillEnabled: Bool = false
     var qwen4GdnDecodeWideProj: Bool = false
+    var activationFp16Enabled: Bool = false
     var thinkingBudgetEnabled: Bool = false
     var thinkingBudgetTokens: String = "8192"
     var limitToolResults: Bool = false
@@ -558,7 +559,7 @@ final class ModelSettingsScreenVM {
         case .topP, .topK, .minP, .repetitionPenalty, .presencePenalty:
             return true
         case .enableThinking, .ssdNgramOffload,
-             .deepseekV41CedPrefill, .qwen4GdnDecodeWideProj,
+             .deepseekV41CedPrefill, .qwen4GdnDecodeWideProj, .activationFp16,
              .thinkingBudgetEnabled, .thinkingBudgetTokens:
             return true
         case .limitToolResults, .toolResultLimitTokens:
@@ -735,6 +736,7 @@ final class ModelSettingsScreenVM {
                     || (s?.deepseekV41EngramSsdOffload ?? false)
                 self.deepseekV41CedPrefillEnabled = s?.deepseekV41CedPrefillEnabled ?? false
                 self.qwen4GdnDecodeWideProj = s?.qwen4GdnDecodeWideProj ?? false
+                self.activationFp16Enabled = s?.activationFp16Enabled ?? false
                 self.thinkingBudgetEnabled = s?.thinkingBudgetEnabled ?? false
                 self.thinkingBudgetTokens = s?.thinkingBudgetTokens.map(String.init) ?? "8192"
                 self.limitToolResults = (s?.maxToolResultTokens ?? 0) > 0
@@ -901,6 +903,7 @@ final class ModelSettingsScreenVM {
         case .qwen4GdnDecodeWideProj:
             guard isQwen4Exp else { return }
             patch.qwen4GdnDecodeWideProj = qwen4GdnDecodeWideProj
+        case .activationFp16:          patch.activationFp16Enabled = activationFp16Enabled
         case .thinkingBudgetEnabled:   patch.thinkingBudgetEnabled = thinkingBudgetEnabled
         case .thinkingBudgetTokens:    patch.thinkingBudgetTokens = Int(thinkingBudgetTokens)
         case .limitToolResults:
@@ -1341,7 +1344,20 @@ final class ModelSettingsScreenVM {
     /// Streamed experts cannot back a speculative decoder, except the
     /// Lightning MTP head of families that keep it resident. Mirrors
     /// `validate_moe_expert_offload` on the server.
+    /// The server rejects the recast together with MoE expert offload.
+    var activationFp16ConflictReason: String? {
+        guard moeExpertOffloadEnabled else { return nil }
+        return String(localized: "settings.advanced.activation_fp16.conflict.moe_offload",
+                      defaultValue: "Disable MoE Expert Offload before enabling Float16 Activations.",
+                      comment: "Sublabel shown when the float16 activation recast can't be enabled because MoE expert offload is on")
+    }
+
     var moeExpertOffloadConflictReason: String? {
+        if activationFp16Enabled {
+            return String(localized: "settings.moe_offload.conflict.activation_fp16",
+                          defaultValue: "Disable Float16 Activations before enabling MoE Expert Offload.",
+                          comment: "Tooltip / sublabel shown when MoE expert offload can't be enabled because the float16 activation recast is on")
+        }
         if mtpEnabled && model?.moeOffloadAllowsMtp != true {
             return String(localized: "settings.moe_offload.conflict.mtp",
                           defaultValue: "Disable Lightning MTP before enabling MoE Expert Offload.",

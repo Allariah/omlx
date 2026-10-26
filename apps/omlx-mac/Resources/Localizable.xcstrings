@@ -21742,6 +21742,42 @@
         }
       }
     },
+    "settings.advanced.activation_fp16.conflict.moe_offload" : {
+      "comment" : "Sublabel shown when the float16 activation recast can't be enabled because MoE expert offload is on",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Disable MoE Expert Offload before enabling Float16 Activations."
+          }
+        }
+      }
+    },
+    "settings.advanced.activation_fp16.label" : {
+      "comment" : "Row label for the load-time bfloat16 to float16 recast toggle",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Float16 Activations"
+          }
+        }
+      }
+    },
+    "settings.advanced.activation_fp16.sub" : {
+      "comment" : "Sublabel for the load-time bfloat16 to float16 recast toggle",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Converts the bfloat16 scales, norms and embeddings of this model to float16 at load. M1 and M2 GPUs emulate bfloat16, so prefill and decode run faster. Output can differ slightly from bfloat16."
+          }
+        }
+      }
+    },
     "settings.advanced.chat_template.add_custom" : {
       "comment" : "Menu item for adding a custom (free-form key/value) chat-template kwarg",
       "extractionState" : "manual",
@@ -25140,6 +25176,18 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "VLM"
+          }
+        }
+      }
+    },
+    "settings.moe_offload.conflict.activation_fp16" : {
+      "comment" : "Tooltip / sublabel shown when MoE expert offload can't be enabled because the float16 activation recast is on",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Disable Float16 Activations before enabling MoE Expert Offload."
           }
         }
       }

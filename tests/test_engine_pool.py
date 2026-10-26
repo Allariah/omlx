@@ -927,6 +927,22 @@ class TestQwenCpuShareMemoryEstimate:
         assert off != on
         assert dict(on)["qwen4_gdn_decode_wide_proj"] == "True"
 
+    def test_activation_fp16_setting_changes_engine_signature(self, tmp_path):
+        from omlx.model_settings import ModelSettings
+
+        pool = _make_pool(ceiling=500)
+        entry = EngineEntry(
+            model_id="m", model_path=str(tmp_path), model_type="llm",
+            engine_type="batched", estimated_size=100,
+        )
+        pool._entries[entry.model_id] = entry
+        settings = ModelSettings()
+        off = pool._engine_runtime_signature("m", settings)
+        settings.activation_fp16_enabled = True
+        on = pool._engine_runtime_signature("m", settings)
+        assert off != on
+        assert dict(on)["activation_fp16_enabled"] == "True"
+
     @pytest.mark.asyncio
     async def test_v41_live_admission_keeps_viable_mmap_fallback(self, tmp_path):
         """Real pressure may select mmap without making that override sticky."""

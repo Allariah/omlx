@@ -1185,6 +1185,10 @@ class EnginePool:
         if mtp_active:
             add("mtp_adaptive_max_depth", data.get("mtp_adaptive_max_depth"))
             add("mtp_fixed_depth", data.get("mtp_fixed_depth"))
+        add(
+            "activation_fp16_enabled",
+            bool(data.get("activation_fp16_enabled", False)),
+        )
         if entry is not None:
             qwen4_offload, _, _ = self._qwen4_ple_offload_status(entry, settings)
             add("qwen4_ple_ssd_offload", qwen4_offload)

@@ -1303,6 +1303,8 @@
   "modal.model_settings.deepseek_v41_ced_prefill_hint": "在測試配置下將預填充速度提升約 74–79%。利用模型的因果編碼器–解碼器（Causal Encoder–Decoder）架構減少解碼器的預填充運算量。",
   "modal.model_settings.qwen4_gdn_decode_wide_proj": "Qwen4 Extended Fused Decode",
   "modal.model_settings.qwen4_gdn_decode_wide_proj_hint": "Speeds up decode on Qwen4 oQ2.5e, oQ2.7e, oQ6e, oQ8e and 8-bit community models (about 3-6% on an 8-bit model, up to 1.5 GiB more memory). No effect on oQ3e to oQ4e or fp16 builds, and little effect with Lightning MTP on.",
+  "modal.model_settings.activation_fp16": "Float16 Activations",
+  "modal.model_settings.activation_fp16_hint": "Converts the bfloat16 scales, norms and embeddings of this model to float16 at load. M1 and M2 GPUs emulate bfloat16, so prefill and decode run faster. Output can differ slightly from bfloat16. Not available with MoE expert offload.",
   "modal.model_settings.thinking_budget": "思考 Token 限制",
   "modal.model_settings.thinking_budget_hint": "限制推理模型的思考 Token 數量，超出時強制結束思考",
   "modal.model_settings.thinking_budget_placeholder": "例如 4096",

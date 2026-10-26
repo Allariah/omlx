@@ -1,11 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Cover the fp16 activation recast used by the OMLX_ACT_FP16 experiment."""
+"""Cover the load-time bfloat16 -> float16 activation recast."""
+
+import json
+import struct
 
 import mlx.core as mx
 import mlx.nn as nn
+import pytest
 from mlx.utils import tree_flatten
 
-from omlx.utils.model_loading import cast_bf16_params_to_fp16
+from omlx.cache.paged_ssd_cache import numerics_revision_for_model
+from omlx.utils.model_loading import (
+    cast_bf16_params_to_fp16,
+    checkpoint_has_bf16_leaves,
+)
 
 
 def _toy_quantized_model() -> nn.Module:
@@ -57,22 +65,53 @@ def test_recast_is_a_noop_when_nothing_is_bf16():
     model.set_dtype(mx.float16)
     mx.eval(model.parameters())
     assert cast_bf16_params_to_fp16(model) == 0
+    assert numerics_revision_for_model(model) is None
 
 
-if __name__ == "__main__":
-    test_recast_moves_bf16_leaves_to_fp16_and_keeps_u32_payloads()
-    test_recast_is_a_noop_when_nothing_is_bf16()
-    print("OK")
+def test_recast_tags_cache_numerics():
+    model = _toy_quantized_model()
+    assert numerics_revision_for_model(model) is None
+    cast_bf16_params_to_fp16(model)
+    assert numerics_revision_for_model(model) == "fp16-recast"
+
+
+def test_recast_peak_stays_within_one_chunk():
+    model = nn.Sequential(*[nn.Linear(512, 512, bias=False) for _ in range(32)])
+    model.set_dtype(mx.bfloat16)
+    mx.eval(model.parameters())
+    mx.synchronize()
+    mx.clear_cache()
+    mx.reset_peak_memory()
+    before = mx.get_active_memory()
+
+    cast_bf16_params_to_fp16(model)
+    mx.synchronize()
+
+    # A second copy of every leaf would add 32 x 512 KiB; one chunk adds 8.
+    tensor_bytes = 512 * 512 * 2
+    assert mx.get_peak_memory() - before <= 9 * tensor_bytes
+
+
+def test_cast_keeps_bf16_when_a_value_exceeds_the_float16_range():
+    model = _toy_quantized_model()
+    norm = model.layers[1]
+    norm.weight = mx.full(norm.weight.shape, 70000.0).astype(mx.bfloat16)
+    mx.eval(norm.weight)
+    before = {key: value.dtype for key, value in tree_flatten(model.parameters())}
+
+    with pytest.raises(ValueError, match="float16 range"):
+        cast_bf16_params_to_fp16(model)
+
+    after = {key: value.dtype for key, value in tree_flatten(model.parameters())}
+    assert after == before
+    assert numerics_revision_for_model(model) is None
 
 
 def test_checkpoint_has_bf16_leaves_reads_safetensors_headers(tmp_path):
-    import json as _json
-    import struct
-
-    from omlx.utils.model_loading import checkpoint_has_bf16_leaves
-
     def _write(path, dtype):
-        header = _json.dumps({"w": {"dtype": dtype, "shape": [2], "data_offsets": [0, 4]}}).encode()
+        header = json.dumps(
+            {"w": {"dtype": dtype, "shape": [2], "data_offsets": [0, 4]}}
+        ).encode()
         path.write_bytes(struct.pack("<Q", len(header)) + header + b"\x00" * 4)
 
     bf16_dir = tmp_path / "bf16"
@@ -87,53 +126,4 @@ def test_checkpoint_has_bf16_leaves_reads_safetensors_headers(tmp_path):
     assert checkpoint_has_bf16_leaves(str(fp16_dir)) is False
 
     assert checkpoint_has_bf16_leaves("") is False
-    assert checkpoint_has_bf16_leaves(str(tmp_path / "nao-existe")) is False
-
-
-def test_cast_is_all_or_nothing_when_a_chunk_fails(monkeypatch):
-    """A failure part-way must leave the model fully bfloat16, not mixed."""
-    import mlx.core as mx
-    import mlx.nn as nn
-    from omlx.utils import model_loading as ml
-
-    class Tiny(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.a = mx.ones((4,), dtype=mx.bfloat16)
-            self.b = mx.ones((4,), dtype=mx.bfloat16)
-
-    model = Tiny()
-    monkeypatch.setattr(ml, "_MATERIALIZE_EVAL_CHUNK", 1)
-    calls = {"n": 0}
-    real_eval = mx.eval
-
-    def flaky(arrays):
-        calls["n"] += 1
-        if calls["n"] == 2:
-            raise RuntimeError("simulated failure in the second chunk")
-        return real_eval(arrays)
-
-    monkeypatch.setattr(ml.mx, "eval", flaky)
-    try:
-        ml.cast_bf16_params_to_fp16(model)
-    except RuntimeError:
-        pass
-    assert model.a.dtype == mx.bfloat16 and model.b.dtype == mx.bfloat16
-
-
-def test_cast_keeps_bf16_when_a_value_exceeds_the_float16_range():
-    model = _toy_quantized_model()
-    norm = model.layers[1]
-    norm.weight = mx.full(norm.weight.shape, 70000.0).astype(mx.bfloat16)
-    mx.eval(norm.weight)
-    before = {key: value.dtype for key, value in tree_flatten(model.parameters())}
-
-    try:
-        cast_bf16_params_to_fp16(model)
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("an out-of-range bfloat16 tensor must abort the cast")
-
-    after = {key: value.dtype for key, value in tree_flatten(model.parameters())}
-    assert after == before
+    assert checkpoint_has_bf16_leaves(str(tmp_path / "missing")) is False

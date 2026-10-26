@@ -93,13 +93,14 @@ from ..utils import gpu_power
 from ..utils.fatal import is_command_buffer_error
 from ..utils.hardware import (
     compute_owner_hash,
+    get_apple_gpu_generation,
     get_chip_name,
     get_gpu_core_count,
     get_io_platform_uuid,
     get_total_memory_gb,
     parse_chip_info,
 )
-from ..utils.model_loading import dflash_compatibility
+from ..utils.model_loading import checkpoint_has_bf16_leaves, dflash_compatibility
 from ..utils.network import is_loopback_bind
 from ..utils.release_check import normalize_update_channel, select_latest_release
 from ..websearch import (
@@ -2415,6 +2416,8 @@ async def list_models(is_admin: bool = Depends(require_admin)):
 
     # Combine model info with settings
     models = []
+    # M1/M2 GPUs (families 13/14) have no native bf16 ALU path.
+    fp16_recast_gpu = get_apple_gpu_generation() in (13, 14)
     for model_info in models_status:
         model_id = model_info["id"]
         settings = all_settings.get(model_id)
@@ -2430,14 +2433,9 @@ async def list_models(is_admin: bool = Depends(require_admin)):
         moe_offload_supported, _ = moe_offload_compatibility(
             model_info.get("model_path") or ""
         )
-        try:
-            from ..utils.model_loading import checkpoint_has_bf16_leaves
-
-            activation_fp16_supported = checkpoint_has_bf16_leaves(
-                model_info.get("model_path", "") or ""
-            )
-        except (OSError, TypeError, ValueError):
-            activation_fp16_supported = False
+        activation_fp16_supported = fp16_recast_gpu and checkpoint_has_bf16_leaves(
+            model_info.get("model_path") or ""
+        )
         qwen4_ple_ssd_offload_supported = False
         qwen4_ple_ssd_offload_forced = False
         qwen4_resident_bytes = 0

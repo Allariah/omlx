@@ -343,6 +343,7 @@ class BatchedEngine(BaseEngine):
 
         # Apply post-load transforms (e.g., IndexCache for DSA models)
         from ..utils.model_loading import (
+            apply_activation_fp16,
             apply_post_load_transforms,
             materialize_lazy_state,
         )
@@ -408,6 +409,12 @@ class BatchedEngine(BaseEngine):
         # inference threads can read them (#1304).
         await loop.run_in_executor(
             get_mlx_executor(), materialize_lazy_state, self._model
+        )
+        await loop.run_in_executor(
+            get_mlx_executor(),
+            apply_activation_fp16,
+            self._model,
+            self._model_settings,
         )
 
         # Supported MoE gate+up regroup: concatenate the routed experts'

@@ -5,13 +5,12 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from pathlib import Path
 from typing import Any
 
 import mlx.core as mx
 import mlx.nn as nn
-from mlx.utils import tree_flatten
+from mlx.utils import tree_flatten, tree_unflatten
 
 from ..patches.arrays_cache_metadata import apply_arrays_cache_metadata_patch
 from ..patches.mlx_vlm_minimax_m3_compat import adopt_expert_global_scales
@@ -1609,7 +1608,11 @@ def checkpoint_has_bf16_leaves(model_path: str) -> bool:
         except (OSError, ValueError):
             continue
         for name, spec in header.items():
-            if name != "__metadata__" and isinstance(spec, dict) and spec.get("dtype") == "BF16":
+            if (
+                name != "__metadata__"
+                and isinstance(spec, dict)
+                and spec.get("dtype") == "BF16"
+            ):
                 return True
     return False
 
@@ -1617,42 +1620,63 @@ def checkpoint_has_bf16_leaves(model_path: str) -> bool:
 def cast_bf16_params_to_fp16(model: Any) -> int:
     """Recast every bfloat16 parameter of a loaded model to float16.
 
-    The M1/M2 GPU has no native bfloat16 ALU path — Metal emulates it — while
-    float16 is native. Activation dtype follows the dtype of the non-quantized
-    leaves (scales, biases, norms, embeddings), so recasting them moves the
-    whole forward onto the native path. Quantized U32 payloads are untouched.
+    M1/M2 GPUs emulate bfloat16 but run float16 natively. The activation dtype
+    follows the non-quantized leaves (scales, biases, norms, embeddings), so
+    recasting them moves the forward onto the native path. Quantized U32
+    payloads are untouched.
 
-    Conversion is evaluated in the same bounded chunks materialize_lazy_state
-    uses (one command buffer per chunk). The cast is all-or-nothing: the model
-    tree is updated only after every chunk converted, so a failure part-way
-    leaves the model entirely in bfloat16 (never mixed). A tensor with a finite
-    value outside the float16 range (> 65504) aborts the whole cast the same way. Peak memory is the
-    bfloat16 originals plus the float16 copies of the NON-quantized leaves
-    only (scales, biases, norms, embeddings) — a small fraction of an
-    oQ checkpoint; the originals are freed when this function returns.
+    A value outside the float16 range raises ValueError before any leaf
+    changes. Leaves are then swapped one chunk at a time, so peak memory grows
+    by one chunk instead of a second copy of every bfloat16 leaf.
 
     Returns the number of tensors recast.
     """
-    from mlx.utils import tree_unflatten
-
     pending = [
         (key, value)
         for key, value in tree_flatten(model.parameters())
         if isinstance(value, mx.array) and value.dtype == mx.bfloat16
     ]
-    converted = []
-    for start in range(0, len(pending), _MATERIALIZE_EVAL_CHUNK):
-        originals = pending[start : start + _MATERIALIZE_EVAL_CHUNK]
-        chunk = [(key, value.astype(mx.float16)) for key, value in originals]
-        # A finite bfloat16 value above 65504 would become inf in float16.
-        overflow = [mx.any(mx.isinf(new) & mx.isfinite(old)) for (_, old), (_, new) in zip(originals, chunk)]
-        mx.eval([value for _, value in chunk] + overflow)
-        if any(bool(flag.item()) for flag in overflow):
+    count = len(pending)
+    fp16_max = mx.finfo(mx.float16).max
+    # Reductions only, so this pass allocates no tensor-sized temporaries.
+    for start in range(0, count, _MATERIALIZE_EVAL_CHUNK):
+        bounds = [
+            bound
+            for _, value in pending[start : start + _MATERIALIZE_EVAL_CHUNK]
+            for bound in (mx.max(value), mx.min(value))
+        ]
+        mx.eval(bounds)
+        if any(abs(bound.item()) > fp16_max for bound in bounds):
             raise ValueError("a bfloat16 tensor exceeds the float16 range")
-        converted.extend(chunk)
-    if converted:
+    while pending:
+        # Rebinding ``pending`` drops the previous chunk's bfloat16 originals.
+        chunk = pending[:_MATERIALIZE_EVAL_CHUNK]
+        pending = pending[_MATERIALIZE_EVAL_CHUNK:]
+        converted = [(key, value.astype(mx.float16)) for key, value in chunk]
+        mx.eval([value for _, value in converted])
         model.update(tree_unflatten(converted))
-    return len(pending)
+        del chunk, converted
+    if count:
+        # Read by numerics_revision_for_model so bfloat16 KV blocks are not reused.
+        model._omlx_fp16_recast = True
+    return count
+
+
+def apply_activation_fp16(model: Any, model_settings: Any = None) -> None:
+    """Run the float16 recast when the model settings enable it."""
+    if not getattr(model_settings, "activation_fp16_enabled", False):
+        return
+    try:
+        recast = cast_bf16_params_to_fp16(model)
+    except Exception:
+        logger.warning(
+            "fp16 activation recast failed; staying on bfloat16", exc_info=True
+        )
+        return
+    if recast:
+        logger.info("activation dtype: bfloat16 -> float16 (%d tensors)", recast)
+    else:
+        logger.info("activation dtype: no bfloat16 leaves; nothing to recast")
 
 
 def apply_post_load_transforms(model: Any, model_settings: Any = None) -> Any:
@@ -1670,22 +1694,6 @@ def apply_post_load_transforms(model: Any, model_settings: Any = None) -> Any:
     Returns:
         The (possibly patched) model.
     """
-    # Native-fp16 activations. Off by default; OMLX_ACT_FP16=1 forces it on for
-    # a one-off A/B without touching persisted settings.
-    if os.environ.get("OMLX_ACT_FP16") == "1" or getattr(
-        model_settings, "activation_fp16_enabled", False
-    ):
-        try:
-            recast = cast_bf16_params_to_fp16(model)
-            if recast:
-                logger.info("activation dtype: bfloat16 -> float16 (%d tensors)", recast)
-            else:
-                logger.info(
-                    "activation dtype: already float16 or better; nothing to recast"
-                )
-        except Exception:
-            logger.warning("fp16 activation recast failed; staying on bfloat16", exc_info=True)
-
     # t5 bias recovery for text-engine loads (~420 MB on Bonsai-27B).
     # VLMBatchedEngine calls free_t5_biases explicitly; this covers the
     # BatchedEngine / LLM path, and is a no-op for non-t5 models.

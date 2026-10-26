@@ -396,6 +396,9 @@ def numerics_revision_for_model(model: Any) -> str | None:
     }
     if yarn := _yarn_revision(modules):
         revisions.add(yarn)
+    # Set by cast_bf16_params_to_fp16: KV computed before the recast is bf16.
+    if any(getattr(module, "_omlx_fp16_recast", False) for module in modules):
+        revisions.add("fp16-recast")
     return ",".join(sorted(revisions)) or None
 
 
