@@ -1026,3 +1026,26 @@ def test_speed_benches_say_the_gpu_power_limit_does_not_apply():
     for name in ("_bench.html", "_bench_context.html"):
         html = (root / name).read_text()
         assert "bench.config.gpu_power_limit_note" in html, name
+
+
+def test_reranker_context_window_is_in_basic_settings():
+    """Reranker requests use max_context_window as their default max_length,
+    the same knob embeddings already expose."""
+    basic = _section(
+        _model_settings_template(),
+        '<section id="ms-basic"',
+        "<!-- Generation defaults (LLM/VLM only) -->",
+    )
+    row = _section(basic, "<!-- Reranker context window -->", "</label>")
+    assert "x-show=\"selectedModel?.model_type === 'reranker'\"" in row
+    assert 'x-model.number="modelSettings.max_context_window"' in row
+    assert "t('modal.model_settings.reranker_context_window_hint')" in row
+
+
+def test_reranker_context_window_i18n_key_exists_in_every_locale():
+    root = Path(__file__).resolve().parents[1]
+    i18n_dir = root / "omlx_web/i18n"
+    key = "modal.model_settings.reranker_context_window_hint"
+    for path in sorted(i18n_dir.glob("*.json")):
+        catalog = json.loads(path.read_text())
+        assert key in catalog, f"{path.name} is missing {key}"
