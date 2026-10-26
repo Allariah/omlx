@@ -999,13 +999,17 @@ private struct BasicSection: View {
                     )
                 }
             }
-            if vm.showsEmbeddingContextWindow {
+            if vm.showsEmbeddingContextWindow || vm.showsRerankerContextWindow {
                 Row(label: String(localized: "settings.basic.context_window.label",
                                   defaultValue: "Context Window",
                                   comment: "Row label for the context window field"),
-                    sublabel: String(localized: "settings.basic.embedding_context_window.sub",
-                                     defaultValue: "Longer inputs are truncated to this length when a request does not set max_length.",
-                                     comment: "Sublabel for the context window field of an embedding model")) {
+                    sublabel: vm.showsRerankerContextWindow
+                        ? String(localized: "settings.basic.reranker_context_window.sub",
+                                 defaultValue: "Used when a request does not set max_length. Jina rerankers read documents together up to this many tokens, other rerankers cut each query-document pair to this length.",
+                                 comment: "Sublabel for the context window field of a reranker model")
+                        : String(localized: "settings.basic.embedding_context_window.sub",
+                                 defaultValue: "Longer inputs are truncated to this length when a request does not set max_length.",
+                                 comment: "Sublabel for the context window field of an embedding model")) {
                     TextInput(text: vm.bindProfile($vm.contextLength), mono: true, suffix: "tk", width: .controlCompact)
                 }
             }

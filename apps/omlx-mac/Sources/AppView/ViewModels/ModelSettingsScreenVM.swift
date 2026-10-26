@@ -481,6 +481,9 @@ final class ModelSettingsScreenVM {
     /// Embedding requests without max_length truncate input to the context window.
     var showsEmbeddingContextWindow: Bool { model?.modelType == "embedding" }
 
+    /// Rerank requests without max_length use the context window as their limit.
+    var showsRerankerContextWindow: Bool { model?.modelType == "reranker" }
+
     /// Acceleration, Memory Saving and Experimental only apply to the MLX
     /// LLM engines.
     var showsEnginePages: Bool { isLLMLike && !isDiffusionModel }

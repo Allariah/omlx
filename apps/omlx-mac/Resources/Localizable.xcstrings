@@ -23038,6 +23038,48 @@
         }
       }
     },
+    "settings.basic.reranker_context_window.sub" : {
+      "comment" : "Sublabel for the context window field of a reranker model",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Used when a request does not set max_length. Jina rerankers read documents together up to this many tokens, other rerankers cut each query-document pair to this length."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "リクエストで max_length を指定しない場合に使われます。Jina リランカーは文書をこのトークン数までまとめて読み込み、ほかのリランカーはクエリと文書の組ごとにこの長さで切り詰めます。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "요청에 max_length가 없을 때 쓰입니다. Jina 리랭커는 문서를 이 토큰 수까지 한 번에 읽고, 다른 리랭커는 쿼리-문서 쌍마다 이 길이로 자릅니다."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Используется, если в запросе не задан max_length. Реранкеры Jina читают документы вместе до этого числа токенов, остальные обрезают каждую пару запрос-документ до этой длины."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请求未设置 max_length 时使用。Jina 重排序模型一次最多读取这么多 token 的文档，其他重排序模型将每个查询-文档对截断到此长度。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "請求未設定 max_length 時使用。Jina 重排序模型一次最多讀取這麼多 token 的文件，其他重排序模型會將每個查詢-文件配對截斷到此長度。"
+          }
+        }
+      }
+    },
     "settings.basic.max_tokens.label" : {
       "comment" : "Row label for the max generated tokens field",
       "extractionState" : "manual",
