@@ -287,11 +287,23 @@ final class ModelSettingsScreenVM {
     var externalEngine: String = ""
 
     /// The engine that serves the model: the setting, or for a GGUF, which
-    /// only an external engine runs, the first engine that can serve it.
+    /// only an external engine runs, Strata when the folder is a pack and
+    /// otherwise the first engine that can serve it.
     var effectiveExternalEngine: String {
         guard externalEngine.isEmpty, model?.isGGUF == true else { return externalEngine }
         let engines = model?.externalEngines ?? []
+        if engines.contains(where: { $0.id == "strata" && $0.compatible }) {
+            return "strata"
+        }
         return engines.first(where: { $0.compatible })?.id ?? engines.first?.id ?? ""
+    }
+
+    /// The engine menu is reachable when an engine is already chosen, and for
+    /// a GGUF pack Strata can serve even while the saved setting is still empty.
+    var canPickExternalEngine: Bool {
+        if !externalEngine.isEmpty { return true }
+        guard model?.isGGUF == true else { return false }
+        return model?.externalEngines?.contains { $0.id == "strata" && $0.compatible } == true
     }
 
     // Embedding audio tower. Empty seconds keeps the 30 s processor default.

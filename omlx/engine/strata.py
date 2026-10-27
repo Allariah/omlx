@@ -21,6 +21,7 @@ import secrets
 import shutil
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import time
@@ -47,15 +48,16 @@ STOP_TIMEOUT_SECONDS = 60
 STOP_POLL_SECONDS = 0.2
 WATCHDOG_POLL_SECONDS = 2
 REQUEST_TIMEOUT_SECONDS = 3600
-VERSION_TIMEOUT_SECONDS = 30
-VERSION_RETRY_SECONDS = 60
 LOG_TAIL_LINES = 5
 
-# Engine packages (BUILD.json) and the terminal (`strata --version`) use
-# different version lines. 0.1.50 is the Qwen engine package that ships with
-# the 0.2.6 terminal; a terminal build reports 0.2.x and passes this floor.
+# The terminal reports 0.2.x (`strata --version`). The engine package the
+# server actually starts is a separate component whose floor is 0.1.50.
 MIN_STRATA_VERSION = (0, 1, 50)
+_NGRAM_TENSOR = "per_layer_token_embd"
+_MODEL_ID = re.compile(r"[a-z0-9](?:[a-z0-9_-]|\.(?!\.)){0,127}\Z")
 _NON_METAL_BACKENDS = frozenset({"cuda", "hip", "sycl"})
+_MAX_GGUF_ITEMS = 1 << 20
+_MAX_GGUF_STRING = 1 << 20
 STRATA_INSTALL_HINT = (
     "Strata is not installed: install the Strata terminal "
     "(https://github.com/Niko1221/Strata) and set strata_path if it is not on PATH"
@@ -121,7 +123,7 @@ def _find_launcher(name: str) -> Path | None:
     return None
 
 
-def _read_build(path: Path) -> dict | None:
+def _read_json(path: Path) -> dict | None:
     try:
         data = json.loads(path.read_text())
     except (OSError, ValueError):
@@ -129,65 +131,81 @@ def _read_build(path: Path) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def _build_backend(build: dict | None) -> str:
-    """cuda, hip, sycl, or metal when BUILD.json says so; else empty."""
-    if not build:
-        return ""
-    for name in ("cuda", "hip", "sycl"):
-        if build.get(name):
-            return name
-    if build.get("metal"):
-        return "metal"
-    backend = build.get("backend")
-    return backend.lower() if isinstance(backend, str) else ""
+def _components_dir() -> Path:
+    """Where the terminal keeps engine packages.
+
+    Same folder ``strata`` uses: ``STRATA_COMPONENTS_DIR``, else
+    ``$XDG_DATA_HOME/strata/components``.
+    """
+    explicit = os.environ.get("STRATA_COMPONENTS_DIR")
+    if explicit:
+        return Path(explicit).expanduser()
+    data_home = os.environ.get("XDG_DATA_HOME")
+    base = Path(data_home) if data_home else Path.home() / ".local" / "share"
+    return base / "strata" / "components"
 
 
-# (path, binary mtime, BUILD.json mtime) -> (version or None, monotonic time)
-_versions: dict[tuple[str, int, int], tuple[str | None, float]] = {}
+def _component_manifests(binary: Path) -> list[Path]:
+    """The engine manifest for ``binary``.
+
+    A manifest beside the binary is the engine entrypoint's own package.
+    The terminal has none there; its packages live under the components dir.
+    """
+    beside = binary.parent / "engine-component.json"
+    if beside.is_file():
+        return [beside]
+    root = _components_dir() / "engine"
+    if not root.is_dir():
+        return []
+    return sorted(path for path in root.glob("*/engine-component.json") if path.is_file())
 
 
-def _read_cli_version(path: str) -> str | None:
-    try:
-        result = subprocess.run(
-            [path, "--version"],
-            capture_output=True,
-            text=True,
-            timeout=VERSION_TIMEOUT_SECONDS,
-            env=_strata_env(None),
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        logger.warning("Strata: %s --version failed: %s", path, exc)
+def _component_record(path: Path) -> tuple[str, str] | None:
+    data = _read_json(path)
+    if data is None:
         return None
-    match = re.search(r"\d+\.\d+\.\d+", result.stdout + result.stderr)
-    return match.group(0) if match else None
+    version = data.get("version")
+    backend = data.get("backend")
+    if not isinstance(version, str) or not isinstance(backend, str):
+        return None
+    if _version_tuple(version) is None:
+        return None
+    return version, backend.lower()
 
 
-def _describe_binary(path: Path) -> tuple[str | None, dict | None]:
-    """Version from BUILD.json beside the binary, else ``strata --version``."""
-    build_path = path.parent / "BUILD.json"
-    build = _read_build(build_path)
-    version = None
-    if build is not None and isinstance(build.get("version"), str):
-        version = build["version"]
-    if version is not None and _version_tuple(version) is not None:
-        return version, build
-    try:
-        key = (
-            str(path),
-            path.stat().st_mtime_ns,
-            build_path.stat().st_mtime_ns if build_path.is_file() else 0,
-        )
-    except OSError:
-        return None, build
-    cached = _versions.get(key)
-    now = time.monotonic()
-    if cached is not None and (
-        cached[0] is not None or now - cached[1] < VERSION_RETRY_SECONDS
-    ):
-        return cached[0], build
-    cli_version = _read_cli_version(str(path))
-    _versions[key] = (cli_version, now)
-    return cli_version, build
+def _choose_component(records: list[tuple[str, str]]) -> tuple[str, str] | None:
+    """The engine this machine would start.
+
+    On a Mac a Metal package wins over a newer CUDA/HIP/SYCL package. The
+    caller still refuses whatever this returns when it cannot run here.
+    """
+    parsed: list[tuple[tuple[int, int, int], str, str]] = []
+    for version, backend in records:
+        key = _version_tuple(version)
+        if key is not None:
+            parsed.append((key, version, backend))
+    if not parsed:
+        return None
+    if sys.platform == "darwin":
+        metal = [item for item in parsed if item[2] == "metal"]
+        if metal:
+            parsed = metal
+    parsed.sort(key=lambda item: item[0])
+    _key, version, backend = parsed[-1]
+    return version, backend
+
+
+def _describe_binary(path: Path) -> tuple[str | None, str]:
+    """Engine-component version and backend. The terminal line is not used."""
+    records = [
+        record
+        for manifest in _component_manifests(path)
+        if (record := _component_record(manifest)) is not None
+    ]
+    chosen = _choose_component(records)
+    if chosen is None:
+        return None, ""
+    return chosen
 
 
 def inspect_strata_binary(
@@ -196,19 +214,21 @@ def inspect_strata_binary(
     """Check that ``path`` is a Strata launcher oMLX can start."""
     if not _executable(path):
         return None, f"{path} is not an executable file"
-    version, build = _describe_binary(path)
+    version, backend = _describe_binary(path)
     if version is None or _version_tuple(version) is None:
-        return None, f"{path} did not report a Strata version"
+        return None, (
+            f"{path} has no Strata engine component (engine-component.json)"
+        )
     parsed = _version_tuple(version)
     assert parsed is not None
     if parsed < MIN_STRATA_VERSION:
         minimum = ".".join(str(part) for part in MIN_STRATA_VERSION)
         return None, f"Strata {version} is too old; oMLX needs {minimum} or later"
-    backend = _build_backend(build)
-    if sys.platform == "darwin" and backend in _NON_METAL_BACKENDS:
+    if sys.platform == "darwin" and backend != "metal":
+        label = backend.upper() if backend in _NON_METAL_BACKENDS else backend or "non-Metal"
         return (
             None,
-            f"Strata at {path} is a {backend.upper()} build; "
+            f"Strata at {path} is a {label} build; "
             "oMLX on a Mac needs the Metal engine",
         )
     return StrataBinary(path, version, auto_detected, backend), ""
@@ -224,67 +244,158 @@ def find_strata_binary(configured: str | None) -> tuple[StrataBinary | None, str
     return inspect_strata_binary(path, auto_detected=True)
 
 
-def _profile_path(folder: Path) -> Path | None:
-    named = folder / "profile.json"
-    if named.is_file():
-        return named
-    matches = sorted(path for path in folder.glob("strata-*.json") if path.is_file())
-    return matches[0] if matches else None
+def _valid_run_config(path: Path) -> bool:
+    """True when ``strata serve --profile`` would accept ``path``.
 
-
-def _gguf_path(folder: Path) -> Path | None:
-    matches = [
-        path
-        for path in sorted(folder.glob("*.gguf"))
-        if path.is_file() and not path.name.lower().startswith("mmproj")
-    ]
-    return matches[0] if matches else None
-
-
-def _ngram_path(folder: Path) -> Path | None:
-    matches = [
-        path
-        for path in sorted(folder.iterdir())
-        if path.is_file()
-        and ("ngram" in path.name.lower() or "n-gram" in path.name.lower())
-    ]
-    return matches[0] if matches else None
-
-
-def resolve_strata_target(
-    model_path: str | Path, configured_binary: str | None
-) -> tuple[StrataTarget | None, str]:
-    """Whether Strata can serve ``model_path``.
-
-    A pack is a profile (``profile.json`` or ``strata-*.json``), a GGUF body,
-    and an n-gram table in the model folder. This does not read the weights.
+    ``read_run_config`` requires ``exe``, ``tokenizer``, and an ``args`` array
+    of strings. A saved profile (``profile.json``) is a different file.
     """
-    binary, reason = find_strata_binary(configured_binary)
-    if binary is None:
-        return None, reason
+    data = _read_json(path)
+    if data is None or not isinstance(data.get("args"), list):
+        return False
+    if not all(isinstance(arg, str) for arg in data["args"]):
+        return False
+    return all(isinstance(data.get(key), str) and data[key] for key in ("exe", "tokenizer"))
+
+
+def _run_config(folder: Path) -> Path | None:
+    matches = []
+    try:
+        paths = list(folder.glob("strata-*.json"))
+    except OSError:
+        return None
+    for path in paths:
+        name = path.name
+        if not path.is_file() or name.endswith(".shared-settings.json"):
+            continue
+        model_id = name[len("strata-") : -len(".json")]
+        if _MODEL_ID.fullmatch(model_id) is None or not _valid_run_config(path):
+            continue
+        matches.append(path)
+    return sorted(matches)[0] if matches else None
+
+
+def _gguf_tensor_names(path: Path) -> set[str]:
+    """Tensor names in a GGUF header. The weight bytes are not read."""
+
+    def take(size: int) -> bytes:
+        data = stream.read(size)
+        if len(data) != size:
+            raise ValueError("truncated GGUF")
+        return data
+
+    def u32() -> int:
+        return struct.unpack("<I", take(4))[0]
+
+    def u64() -> int:
+        value = struct.unpack("<Q", take(8))[0]
+        if value > _MAX_GGUF_ITEMS:
+            raise ValueError("GGUF length out of range")
+        return value
+
+    def string() -> str:
+        length = u64()
+        if length > _MAX_GGUF_STRING:
+            raise ValueError("GGUF string out of range")
+        return take(length).decode("utf-8", "replace")
+
+    def skip_value(kind: int) -> None:
+        if kind <= 7 or kind in (10, 11, 12):
+            sizes = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
+            take(sizes[kind])
+            return
+        if kind == 8:
+            string()
+            return
+        if kind != 9:
+            raise ValueError(f"unknown GGUF type {kind}")
+        item = u32()
+        count = u64()
+        if item == 8:
+            for _ in range(count):
+                string()
+        elif item <= 7 or item in (10, 11, 12):
+            sizes = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
+            take(sizes[item] * count)
+        else:
+            raise ValueError(f"unsupported GGUF array of type {item}")
+
+    try:
+        with open(path, "rb") as stream:
+            if take(4) != b"GGUF" or u32() < 2:
+                return set()
+            tensor_count = u64()
+            for _ in range(u64()):
+                string()
+                skip_value(u32())
+            names = set()
+            for _ in range(tensor_count):
+                names.add(string())
+                n_dims = u32()
+                if n_dims > 8:
+                    raise ValueError("GGUF tensor rank out of range")
+                take(8 * n_dims)
+                u32()
+                take(8)
+            return names
+    except (OSError, ValueError, struct.error):
+        return set()
+
+
+def _ngram_gguf(folder: Path) -> Path | None:
+    """The shard that holds the n-gram table, not a file named like one."""
+    try:
+        paths = sorted(folder.rglob("*.gguf"))
+    except OSError:
+        return None
+    for path in paths:
+        if not path.is_file() or path.name.lower().startswith("mmproj"):
+            continue
+        if _NGRAM_TENSOR in _gguf_tensor_names(path):
+            return path
+    return None
+
+
+def strata_pack(model_path: str | Path) -> tuple[Path | None, str]:
+    """The run config ``strata serve`` accepts, or why the folder is not a pack.
+
+    A pack is ``strata-<model>.json`` with ``exe``, ``tokenizer``, and
+    ``args``, plus a GGUF shard that contains ``per_layer_token_embd``.
+    ``profile.json`` and ``strata-*.shared-settings.json`` are not packs.
+    This does not read weight bytes.
+    """
     folder = Path(model_path)
     if not folder.is_dir():
         return None, "failed to read the model folder"
-    profile = _profile_path(folder)
-    gguf = _gguf_path(folder)
-    ngram = _ngram_path(folder)
+    config = _run_config(folder)
+    ngram = _ngram_gguf(folder)
     missing = [
         name
-        for name, found in (
-            ("profile", profile),
-            ("GGUF", gguf),
-            ("n-gram table", ngram),
-        )
+        for name, found in (("run config", config), ("n-gram table", ngram))
         if found is None
     ]
     if missing:
         return None, (
             "Strata needs a pack in the model folder "
-            "(a profile, a GGUF, and an n-gram table); "
+            "(a strata-<model>.json run config and a GGUF shard "
+            "with the per_layer_token_embd tensor); "
             f"missing {', '.join(missing)}"
         )
-    assert profile is not None
-    return StrataTarget(binary, profile), ""
+    assert config is not None
+    return config, ""
+
+
+def resolve_strata_target(
+    model_path: str | Path, configured_binary: str | None
+) -> tuple[StrataTarget | None, str]:
+    """Whether Strata can serve ``model_path``."""
+    binary, reason = find_strata_binary(configured_binary)
+    if binary is None:
+        return None, reason
+    config, reason = strata_pack(model_path)
+    if config is None:
+        return None, reason
+    return StrataTarget(binary, config), ""
 
 
 def _free_port() -> int:
@@ -298,6 +409,89 @@ def _signal_group(group: int, sig: int) -> None:
         os.killpg(group, sig)
 
 
+def _signal_pid(pid: int, sig: int) -> None:
+    """Signal ``pid``, or its process group when it leads one.
+
+    ``serve/lifeline.py`` calls ``setpgid(0, 0)`` on the Metal engine, so a
+    signal to the server's group does not reach it.
+    """
+    try:
+        group = os.getpgid(pid)
+    except ProcessLookupError:
+        return
+    if group == pid:
+        _signal_group(pid, sig)
+        return
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(pid, sig)
+
+
+def _process_table() -> dict[int, tuple[int, int]]:
+    """pid -> (ppid, pgid) for the processes ``ps`` can see."""
+    try:
+        result = subprocess.run(
+            ["ps", "-ax", "-o", "pid=,ppid=,pgid="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    rows: dict[int, tuple[int, int]] = {}
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) != 3:
+            continue
+        try:
+            pid, ppid, pgid = (int(part) for part in parts)
+        except ValueError:
+            continue
+        rows[pid] = (ppid, pgid)
+    return rows
+
+
+def _outside_group(root: int, group: int) -> list[int]:
+    """Descendants of ``root`` that lifeline moved out of ``group``."""
+    rows = _process_table()
+    children: dict[int, list[int]] = {}
+    for pid, (ppid, _pgid) in rows.items():
+        children.setdefault(ppid, []).append(pid)
+    found: list[int] = []
+    stack = list(children.get(root, []))
+    seen: set[int] = set()
+    while stack:
+        pid = stack.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        stack.extend(children.get(pid, []))
+        if rows.get(pid, (0, group))[1] != group:
+            found.append(pid)
+    return found
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return True
+    state = result.stdout.strip()
+    return bool(state) and not state.startswith("Z")
+
+
 def _group_alive(group: int) -> bool:
     try:
         os.killpg(group, 0)
@@ -309,6 +503,15 @@ def _group_alive(group: int) -> bool:
 async def _wait_group_exit(group: int, timeout: float) -> bool:
     deadline = time.monotonic() + timeout
     while _group_alive(group):
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(STOP_POLL_SECONDS)
+    return True
+
+
+async def _wait_pids(pids: list[int], timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while any(_pid_alive(pid) for pid in pids):
         if time.monotonic() >= deadline:
             return False
         await asyncio.sleep(STOP_POLL_SECONDS)
@@ -514,11 +717,24 @@ class StrataEngine(BaseEngine):
         if process is None:
             return
         group = process.pid
+        # Snapshot before the signal. Once the server dies, an engine that
+        # lifeline moved to its own process group is reparented and the
+        # watchdog group no longer names it.
+        outsiders = _outside_group(group, group)
         _signal_group(group, signal.SIGTERM)
-        if not await _wait_group_exit(group, STOP_TIMEOUT_SECONDS):
+        for pid in outsiders:
+            _signal_pid(pid, signal.SIGTERM)
+        group_done = await _wait_group_exit(group, STOP_TIMEOUT_SECONDS)
+        outsiders_done = await _wait_pids(outsiders, STOP_TIMEOUT_SECONDS)
+        if not group_done or not outsiders_done:
             logger.warning("Strata: server ignored SIGTERM; killing it")
-            _signal_group(group, signal.SIGKILL)
+            if not group_done:
+                _signal_group(group, signal.SIGKILL)
+            for pid in outsiders:
+                if _pid_alive(pid):
+                    _signal_pid(pid, signal.SIGKILL)
             await _wait_group_exit(group, STOP_TIMEOUT_SECONDS)
+            await _wait_pids(outsiders, STOP_TIMEOUT_SECONDS)
         await asyncio.to_thread(process.wait)
 
     def _refuse_request(self) -> None:

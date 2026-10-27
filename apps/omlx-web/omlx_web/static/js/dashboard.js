@@ -4436,11 +4436,25 @@
                 return this.modelSettings.model_format === 'gguf';
             },
 
+            // A saved engine id, or a GGUF pack Strata can serve. A plain GGUF
+            // stays on the first engine that can run it (Splash).
+            canPickExternalEngine() {
+                if (this.modelSettings.external_engine) return true;
+                if (!this.isGgufModel()) return false;
+                return (this.modelSettings.external_engines || []).some(
+                    e => e.id === 'strata' && e.compatible
+                );
+            },
+
             // A GGUF runs on an external engine even when its settings pick none.
+            // A Strata pack defaults to Strata, not to whichever engine is first.
             effectiveExternalEngine() {
                 if (this.modelSettings.external_engine) return this.modelSettings.external_engine;
                 if (!this.isGgufModel()) return '';
-                return this.firstUsableExternalEngine() || this.modelSettings.external_engines?.[0]?.id || '';
+                const engines = this.modelSettings.external_engines || [];
+                const strata = engines.find(e => e.id === 'strata' && e.compatible);
+                if (strata) return 'strata';
+                return this.firstUsableExternalEngine() || engines[0]?.id || '';
             },
 
             externalEngineDraftRepo() {

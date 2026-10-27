@@ -10,6 +10,7 @@ import json
 import os
 import signal
 import stat
+import struct
 import subprocess
 import sys
 import textwrap
@@ -43,16 +44,87 @@ def _fake_launcher(path: Path, version: str = "0.2.6", body: str = "exit 0\n") -
         f'if [ "$1" = --version ]; then echo "strata {version}"; exit 0; fi\n' + body
     )
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
+    _write_engine_component(path.parent)
     return path
 
 
 def _write_pack(folder: Path) -> Path:
+    """A run config and n-gram shard that ``strata serve`` can be pointed at."""
     folder.mkdir(parents=True, exist_ok=True)
-    profile = folder / "profile.json"
-    profile.write_text(json.dumps({"engine": "fixture"}))
-    (folder / "model.gguf").write_bytes(b"gguf")
-    (folder / "ngram-table.bin").write_bytes(b"ngram")
-    return profile
+    _gguf_with_tensor(folder / "model.gguf", "per_layer_token_embd")
+    return _write_run_config(folder)
+
+
+def _gguf_with_tensor(path: Path, tensor: str) -> None:
+    """A GGUF v3 header whose tensor list is exactly ``tensor``."""
+    name = tensor.encode()
+    path.write_bytes(
+        b"".join(
+            (
+                b"GGUF",
+                struct.pack("<I", 3),
+                struct.pack("<Q", 1),
+                struct.pack("<Q", 0),
+                struct.pack("<Q", len(name)),
+                name,
+                struct.pack("<I", 1),
+                struct.pack("<Q", 1),
+                struct.pack("<I", 0),
+                struct.pack("<Q", 0),
+            )
+        )
+    )
+
+
+def _write_run_config(folder: Path, model: str = "flash") -> Path:
+    """A strata-<model>.json that ``strata serve --profile`` accepts."""
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"strata-{model}.json"
+    path.write_text(
+        json.dumps(
+            {
+                "exe": str(folder / "engine"),
+                "tokenizer": str(folder / "tokenizer.model"),
+                "args": ["--model", str(folder / "model.gguf")],
+            }
+        )
+    )
+    return path
+
+
+def _write_engine_component(
+    directory: Path, *, version: str = "0.1.50", backend: str = "metal"
+) -> Path:
+    path = directory / "engine-component.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "id": "strata-engine",
+                "version": version,
+                "backend": backend,
+                "platform": "darwin-arm64",
+                "entrypoint": "strata",
+            }
+        )
+    )
+    return path
+
+
+def _pid_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    stat_line = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.strip()
+    return bool(stat_line) and not stat_line.startswith("Z")
 
 
 @pytest.fixture
@@ -79,10 +151,11 @@ def _pool(tmp_path) -> tuple[EnginePool, EngineEntry]:
 
 
 class TestDiscovery:
-    def test_version_comes_from_build_json_or_the_cli(self, tmp_path, monkeypatch):
+    def test_version_comes_from_the_engine_component(self, tmp_path, monkeypatch):
         monkeypatch.setattr(strata_mod, "_find_launcher", lambda name: None)
+        monkeypatch.setattr(strata_mod, "_components_dir", lambda: tmp_path / "components")
         binary = _fake_launcher(tmp_path / "strata", body="echo should-not-run; exit 1\n")
-        (binary.parent / "BUILD.json").write_text(json.dumps({"version": "0.1.50", "metal": True}))
+        (binary.parent / "BUILD.json").write_text(json.dumps({"version": "9.9.9", "metal": True}))
 
         found, reason = find_strata_binary(str(binary))
 
@@ -94,7 +167,8 @@ class TestDiscovery:
         found, reason = find_strata_binary(str(binary2))
         assert reason == ""
         assert found is not None
-        assert found.version == "0.2.6"
+        assert found.version == "0.1.50"
+        assert found.backend == "metal"
 
     def test_configured_path_wins_and_search_uses_path(self, tmp_path, monkeypatch):
         installed = _fake_launcher(tmp_path / "installed" / "strata")
@@ -114,14 +188,12 @@ class TestDiscovery:
         assert missing is None and "not an executable" in reason
 
         old = _fake_launcher(tmp_path / "old" / "strata")
-        (old.parent / "BUILD.json").write_text(json.dumps({"version": "0.1.49"}))
+        _write_engine_component(old.parent, version="0.1.49", backend="metal")
         _, reason = find_strata_binary(str(old))
         assert "too old" in reason
 
         cuda = _fake_launcher(tmp_path / "cuda" / "strata")
-        (cuda.parent / "BUILD.json").write_text(
-            json.dumps({"version": "0.1.50", "cuda": "13.0"})
-        )
+        _write_engine_component(cuda.parent, version="0.1.50", backend="cuda")
         monkeypatch.setattr(strata_mod.sys, "platform", "darwin")
         _, reason = find_strata_binary(str(cuda))
         assert "CUDA" in reason and "Metal" in reason
@@ -138,12 +210,12 @@ class TestDiscovery:
         with pytest.raises(ModelLoadingError, match="Strata cannot serve 'flash':"):
             pool._external_engine_for(entry, settings, "batched")
         _target, reason = pool.strata_target(entry.model_id, settings)
-        assert "missing profile, GGUF, n-gram table" in reason
+        assert "missing run config, n-gram table" in reason
 
         _write_pack(Path(entry.model_path))
         engine = pool._external_engine_for(entry, settings, "batched")
         assert isinstance(engine, StrataEngine)
-        assert engine._target.profile_path.name == "profile.json"
+        assert engine._target.profile_path.name == "strata-flash.json"
 
     def test_rows_report_each_engine(self, tmp_path, global_settings):
         pool, entry = _pool(tmp_path)
@@ -155,6 +227,89 @@ class TestDiscovery:
         assert rows["splash"]["compatible"] is False
         assert rows["strata"]["compatible"] is False
         assert "Strata" in rows["strata"]["reason"]
+
+    def test_engine_component_not_the_terminal(self, tmp_path, monkeypatch):
+        """The floor is the engine package, not the 0.2.6 terminal line."""
+        monkeypatch.setattr(strata_mod, "_find_launcher", lambda name: None)
+        monkeypatch.setattr(strata_mod, "_components_dir", lambda: tmp_path / "components")
+        monkeypatch.setattr(strata_mod.sys, "platform", "darwin")
+        terminal = _fake_launcher(tmp_path / "bin" / "strata", version="0.2.6")
+
+        metal = _write_engine_component(terminal.parent, version="0.1.50", backend="metal")
+        found, reason = find_strata_binary(str(terminal))
+        assert reason == ""
+        assert found is not None
+        assert (found.version, found.backend) == ("0.1.50", "metal")
+
+        metal.unlink()
+        _write_engine_component(terminal.parent, version="0.1.49", backend="metal")
+        _, reason = find_strata_binary(str(terminal))
+        assert "too old" in reason
+
+        _write_engine_component(terminal.parent, version="0.1.50", backend="cuda")
+        _, reason = find_strata_binary(str(terminal))
+        assert "CUDA" in reason and "Metal" in reason
+
+        (terminal.parent / "engine-component.json").unlink()
+        (terminal.parent / "BUILD.json").write_text(
+            json.dumps({"version": "0.1.50", "metal": True})
+        )
+        found, reason = find_strata_binary(str(terminal))
+        assert found is None
+        assert "engine-component.json" in reason
+
+        # The terminal does not sit next to the manifest. Packages live in
+        # components/engine/<version>-<platform>-<backend>/.
+        packaged = _fake_launcher(tmp_path / "terminal" / "strata", version="0.2.6")
+        (packaged.parent / "engine-component.json").unlink()
+        metal_dir = (
+            tmp_path / "components" / "engine" / "0.1.50-macos-arm64-metal"
+        )
+        metal_dir.mkdir(parents=True)
+        _write_engine_component(metal_dir, version="0.1.50", backend="metal")
+        cuda_dir = tmp_path / "components" / "engine" / "0.1.60-linux-x86_64-cuda"
+        cuda_dir.mkdir()
+        _write_engine_component(cuda_dir, version="0.1.60", backend="cuda")
+        found, reason = find_strata_binary(str(packaged))
+        assert reason == ""
+        assert found is not None
+        assert (found.version, found.backend) == ("0.1.50", "metal")
+        (metal_dir / "engine-component.json").unlink()
+        _, reason = find_strata_binary(str(packaged))
+        assert "CUDA" in reason and "Metal" in reason
+
+    def test_pack_is_a_run_config_and_ple_shard(self, tmp_path, global_settings):
+        binary = _fake_launcher(tmp_path / "strata")
+        _write_engine_component(binary.parent)
+        global_settings.integrations.strata_path = str(binary)
+        pool, entry = _pool(tmp_path)
+        folder = Path(entry.model_path)
+
+        # A saved profile, a shared-settings file, and an ngram-named note
+        # are not a pack Strata will start.
+        (folder / "profile.json").write_text(json.dumps({"engine": "fixture"}))
+        shared = folder / "strata-flash.shared-settings.json"
+        shared.write_text(
+            json.dumps(
+                {
+                    "exe": str(folder / "engine"),
+                    "tokenizer": str(folder / "tokenizer.model"),
+                    "args": ["--model", "model.gguf"],
+                }
+            )
+        )
+        _gguf_with_tensor(folder / "model.gguf", "token_embd.weight")
+        (folder / "ngram-table.bin").write_bytes(b"not-a-shard")
+        _target, reason = pool.strata_target(entry.model_id, None)
+        assert _target is None
+        assert "run config" in reason or "n-gram" in reason
+
+        config = _write_run_config(folder)
+        _gguf_with_tensor(folder / "model.gguf", "per_layer_token_embd")
+        target, reason = pool.strata_target(entry.model_id, None)
+        assert reason == ""
+        assert target is not None
+        assert target.profile_path == config
 
 
 class TestDispatch:
@@ -189,6 +344,101 @@ class TestDispatch:
         )
         assert isinstance(engine, StrataEngine)
         assert not isinstance(engine, SplashEngine)
+
+    def test_an_empty_setting_selects_strata_for_a_pack(
+        self, tmp_path, monkeypatch, global_settings
+    ):
+        from tests.test_splash_engine import _fake_launcher as splash_launcher
+
+        monkeypatch.setattr("omlx.engine.splash._find_launcher", lambda name: None)
+        monkeypatch.setattr("omlx.engine.splash._is_m1_or_m2", lambda: False)
+        splash = splash_launcher(tmp_path / "bin" / "splash")
+        monkeypatch.setattr(
+            "omlx.engine.splash._find_launcher",
+            lambda name: splash if name == "splash" else None,
+        )
+        binary = _fake_launcher(tmp_path / "strata")
+        _write_engine_component(binary.parent)
+        global_settings.integrations.strata_path = str(binary)
+        pool, entry = _pool(tmp_path)
+        entry.model_format = "gguf"
+        _write_run_config(Path(entry.model_path))
+        _gguf_with_tensor(
+            Path(entry.model_path) / "model.gguf", "per_layer_token_embd"
+        )
+
+        engine = pool._external_engine_for(entry, ModelSettings(), "batched")
+        assert isinstance(engine, StrataEngine)
+        assert pool.external_engine_id(entry.model_id, ModelSettings()) == "strata"
+
+        from tests.test_splash_engine import _pool as splash_pool
+
+        plain, plain_entry = splash_pool(tmp_path / "plain")
+        plain_entry.model_format = "gguf"
+        splash_engine = plain._external_engine_for(
+            plain_entry, ModelSettings(), "vlm"
+        )
+        assert isinstance(splash_engine, SplashEngine)
+        assert plain.external_engine_id(plain_entry.model_id, ModelSettings()) == "splash"
+
+    async def test_v1_models_lists_a_pack_splash_refuses(
+        self, tmp_path, global_settings
+    ):
+        import omlx.server as server_module
+
+        binary = _fake_launcher(tmp_path / "strata")
+        _write_engine_component(binary.parent)
+        global_settings.integrations.strata_path = str(binary)
+        pool, entry = _pool(tmp_path)
+        entry.model_format = "gguf"
+        _write_run_config(Path(entry.model_path))
+        _gguf_with_tensor(
+            Path(entry.model_path) / "model.gguf", "per_layer_token_embd"
+        )
+        plain = tmp_path / "models" / "plain"
+        plain.mkdir()
+        (plain / "weights.gguf").write_bytes(b"GGUF")
+        pool._entries["plain"] = EngineEntry(
+            model_id="plain",
+            model_path=str(plain),
+            model_type="llm",
+            engine_type="batched",
+            estimated_size=GIB,
+            model_format="gguf",
+        )
+        original_pool = server_module._server_state.engine_pool
+        original_settings = server_module._server_state.global_settings
+        server_module._server_state.engine_pool = pool
+        server_module._server_state.global_settings = global_settings
+        try:
+            response = await server_module.list_models(True)
+        finally:
+            server_module._server_state.engine_pool = original_pool
+            server_module._server_state.global_settings = original_settings
+
+        ids = {model["id"] for model in json.loads(bytes(response.body))["data"]}
+        assert "flash" in ids
+        assert "plain" not in ids
+
+    def test_model_settings_can_pick_strata_for_a_pack(self):
+        root = Path(__file__).resolve().parents[1]
+        html = (
+            root / "apps/omlx-web/omlx_web/templates/dashboard/_modal_model_settings.html"
+        ).read_text()
+        script = (root / "apps/omlx-web/omlx_web/static/js/dashboard.js").read_text()
+        view = (
+            root
+            / "apps/omlx-mac/Sources/AppView/Screens/ModelSettingsScreen.swift"
+        ).read_text()
+        vm = (
+            root
+            / "apps/omlx-mac/Sources/AppView/ViewModels/ModelSettingsScreenVM.swift"
+        ).read_text()
+        assert "canPickExternalEngine" in html
+        assert "canPickExternalEngine" in script
+        assert "id === 'strata' && e.compatible" in script
+        assert "canPickExternalEngine" in view
+        assert 'id == "strata" && $0.compatible' in vm
 
     def test_process_memory_counts_strata(self, tmp_path):
         pool, entry = _pool(tmp_path)
@@ -315,6 +565,39 @@ class TestLifecycle:
 
         assert not _group_alive(group)
         assert engine.get_stats()["running"] is False
+
+    async def test_stop_reaps_an_out_of_group_engine(
+        self, tmp_path, lifecycle, monkeypatch
+    ):
+        """lifeline moves the Metal engine to its own process group."""
+        pid_path = tmp_path / "engine.pid"
+        monkeypatch.setenv("STRATA_TEST_ENGINE_PID", str(pid_path))
+        script = tmp_path / "server.py"
+        script.write_text(FAKE_SERVER)
+        body = (
+            f'"{sys.executable}" -c \'import os, time; os.setpgid(0, 0); '
+            'open(os.environ["STRATA_TEST_ENGINE_PID"], "w").write(str(os.getpid())); '
+            "time.sleep(120)' &\n"
+            f'exec "{sys.executable}" "{script}" "$@"\n'
+        )
+        engine = lifecycle(body)
+        pid = None
+        try:
+            await engine.start()
+            pid = int(pid_path.read_text())
+            assert os.getpgid(pid) == pid
+            assert os.getpgid(pid) != engine._process.pid
+            await engine.stop()
+            for _ in range(50):
+                if not _pid_running(pid):
+                    break
+                await asyncio.sleep(0.1)
+            assert not _pid_running(pid)
+        finally:
+            if engine._process is not None and engine._process.poll() is None:
+                await engine.stop()
+            if pid is not None and _pid_running(pid):
+                os.kill(pid, signal.SIGKILL)
 
     async def test_exit_during_start_reports_the_log(self, tmp_path, lifecycle):
         engine = lifecycle('echo "error: the pack is missing" >&2\nexit 1\n')

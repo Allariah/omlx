@@ -1594,11 +1594,25 @@ private struct ExternalEngineRow: View {
                     .disabled(draftStarted)
                     .help(draftError ?? "")
                 }
-                if !vm.externalEngine.isEmpty {
-                    Popup(selection: vm.bind($vm.externalEngine, save: save),
+                if vm.canPickExternalEngine {
+                    Popup(selection: Binding(
+                        get: {
+                            vm.externalEngine.isEmpty
+                                ? vm.effectiveExternalEngine
+                                : vm.externalEngine
+                        },
+                        set: { newValue in
+                            vm.externalEngine = newValue
+                            save()
+                        }
+                    ),
                           width: .controlCompact,
                           options: engines
-                              .filter { $0.compatible || $0.id == vm.externalEngine }
+                              .filter {
+                                  $0.compatible
+                                      || $0.id == vm.externalEngine
+                                      || $0.id == vm.effectiveExternalEngine
+                              }
                               .map { ($0.id, $0.label) })
                 }
                 RowSwitch(isOn: Binding(

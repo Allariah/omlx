@@ -55,6 +55,7 @@ from .engine.strata import (
     StrataEngine,
     find_strata_binary,
     resolve_strata_target,
+    strata_pack,
 )
 from .engine.sts import STSEngine
 from .engine.stt import STTEngine
@@ -2306,14 +2307,20 @@ class EnginePool:
     ) -> str | None:
         """The external engine that serves ``model_id``, else None.
 
-        A GGUF, which no in-process engine loads, still defaults to Splash.
-        Strata accepts different files and is selected explicitly.
+        A plain GGUF still defaults to Splash. A Strata pack is also a GGUF
+        folder, and an empty setting must not force Splash onto it.
         """
         engine_id = getattr(model_settings, "external_engine", None)
         if engine_id:
             return engine_id
         entry = self._entries.get(model_id)
-        if entry is not None and entry.model_format == "gguf" and "splash" in EXTERNAL_ENGINES:
+        if entry is None or entry.model_format != "gguf":
+            return None
+        if "strata" in EXTERNAL_ENGINES:
+            config, _reason = strata_pack(entry.model_path)
+            if config is not None:
+                return "strata"
+        if "splash" in EXTERNAL_ENGINES:
             return "splash"
         return None
 
