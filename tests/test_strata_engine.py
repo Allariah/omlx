@@ -1195,3 +1195,145 @@ class TestLifecycle:
             in caplog.text
         )
         assert "planned)" in caplog.text
+
+
+def _plan_engine(tmp_path: Path, profile: Path) -> StrataEngine:
+    return StrataEngine(
+        model_name=str(tmp_path / "model"),
+        model_id="flash",
+        target=StrataTarget(
+            StrataBinary(tmp_path / "strata", "0.1.50", True, "metal"),
+            profile,
+        ),
+        log_dir=tmp_path / "logs",
+    )
+
+
+def _plan_profile(folder: Path, args: list[str], **extra: object) -> Path:
+    path = folder / "strata-flash.json"
+    path.write_text(
+        json.dumps(
+            {
+                "exe": "component:strata-engine",
+                "tokenizer": "tokenizer",
+                "args": args,
+                **extra,
+            }
+        )
+    )
+    return path
+
+
+class TestMemoryPlan:
+    """The pool replaces its folder estimate when this budget is non-zero."""
+
+    def test_plan_is_the_opened_shards_plus_the_vram_reserve(self, tmp_path):
+        """Shard 1 is not added again for the decode window, and mmproj is not charged."""
+        model = tmp_path / "model"
+        model.mkdir()
+        native = model / "shard-1.gguf"
+        ple_target = model / "shard-2.gguf"
+        native.write_bytes(b"n" * 4000)
+        ple_target.write_bytes(b"p" * 2500)
+        ple = model / "ple-link.gguf"
+        ple.symlink_to(ple_target)
+        mmproj = model / "mmproj-vision.gguf"
+        mmproj.write_bytes(b"m" * 900)
+        profile = _plan_profile(
+            model,
+            [
+                "--native",
+                native.name,
+                "--ple-gguf",
+                ple.name,
+                "--max-context",
+                "524288",
+                "--mmap-experts",
+                "--vram-reserve-mib",
+                "1536",
+            ],
+            ui_vision_enabled=False,
+        )
+        engine = _plan_engine(tmp_path, profile)
+
+        assert engine.reserved_bytes() == 4000 + 2500 + 1536 * 1024 * 1024
+
+    def test_vision_on_charges_a_projector_in_the_model_folder(self, tmp_path):
+        model = tmp_path / "model"
+        model.mkdir()
+        native = model / "shard-1.gguf"
+        ple = model / "shard-2.gguf"
+        native.write_bytes(b"n" * 10)
+        ple.write_bytes(b"p" * 20)
+        (model / "mmproj-vision.gguf").write_bytes(b"m" * 30)
+        profile = _plan_profile(
+            model,
+            ["--native", native.name, "--ple-gguf", ple.name],
+            ui_vision_enabled=True,
+        )
+
+        assert _plan_engine(tmp_path, profile).reserved_bytes() == 60
+
+    def test_a_named_mmproj_is_charged_when_vision_is_off(self, tmp_path):
+        model = tmp_path / "model"
+        model.mkdir()
+        native = model / "shard-1.gguf"
+        ple = model / "shard-2.gguf"
+        projector = model / "mmproj-named.gguf"
+        native.write_bytes(b"n" * 10)
+        ple.write_bytes(b"p" * 20)
+        projector.write_bytes(b"m" * 7)
+        profile = _plan_profile(
+            model,
+            [
+                "--native",
+                native.name,
+                "--ple-gguf",
+                ple.name,
+                "--mmproj",
+                projector.name,
+            ],
+            ui_vision_enabled=False,
+        )
+
+        assert _plan_engine(tmp_path, profile).reserved_bytes() == 37
+
+    def test_the_same_shard_is_counted_once(self, tmp_path):
+        model = tmp_path / "model"
+        model.mkdir()
+        shard = model / "only.gguf"
+        shard.write_bytes(b"s" * 15)
+        link = model / "alias.gguf"
+        link.symlink_to(shard)
+        profile = _plan_profile(
+            model,
+            ["--native", shard.name, "--ple-gguf", link.name, "--vram-reserve-mib", "2"],
+        )
+
+        assert _plan_engine(tmp_path, profile).reserved_bytes() == 15 + 2 * 1024 * 1024
+
+    def test_a_missing_shard_does_not_replace_the_folder_estimate(self, tmp_path):
+        model = tmp_path / "model"
+        model.mkdir()
+        present = model / "shard-2.gguf"
+        present.write_bytes(b"p" * 20)
+        profile = _plan_profile(
+            model,
+            [
+                "--native",
+                "missing.gguf",
+                "--ple-gguf",
+                present.name,
+                "--vram-reserve-mib",
+                "1536",
+            ],
+        )
+
+        assert _plan_engine(tmp_path, profile).reserved_bytes() == 0
+
+    def test_a_profile_without_shard_flags_keeps_the_folder_estimate(self, tmp_path):
+        model = tmp_path / "model"
+        model.mkdir()
+        profile = _plan_profile(model, ["--max-context", "524288"])
+
+        assert _plan_engine(tmp_path, profile).reserved_bytes() == 0

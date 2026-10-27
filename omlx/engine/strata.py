@@ -5,8 +5,10 @@ Strata (https://github.com/Niko1221/Strata) is a separate program. This
 module does not vendor it and does not translate its Metal kernels into MLX.
 ``start()`` launches ``strata serve`` on a loopback port for a prepared
 profile. Chat is forwarded to the child's ``/v1/chat/completions``.
-Plain completions still refuse, and the pool does not invent a
-resident-byte budget.
+Plain completions still refuse. The pool counts the shards the child
+maps, plus the profile's VRAM reserve. It does not count a projector
+the profile left closed, and it does not add the decode window on top
+of the native shard.
 """
 
 from __future__ import annotations
@@ -819,6 +821,153 @@ def _positive_int(value: object) -> int | None:
     return value
 
 
+def _flag_values(args: object) -> dict[str, str]:
+    """``--flag value`` pairs. A bare flag such as ``--mmap-experts`` is skipped."""
+    if not isinstance(args, list):
+        return {}
+    found: dict[str, str] = {}
+    index = 0
+    while index < len(args):
+        item = args[index]
+        nxt = args[index + 1] if index + 1 < len(args) else None
+        if (
+            isinstance(item, str)
+            and item.startswith("--")
+            and isinstance(nxt, str)
+            and not nxt.startswith("--")
+        ):
+            found[item] = nxt
+            index += 2
+            continue
+        index += 1
+    return found
+
+
+def _vision_enabled(data: dict) -> bool:
+    return data.get("ui_vision_enabled") is True
+
+
+def _vram_reserve_bytes(data: dict, flags: dict[str, str]) -> int:
+    """``--vram-reserve-mib``, else the profile field, as bytes. Not a file size."""
+    raw = flags.get("--vram-reserve-mib")
+    if raw is None:
+        field = data.get("vram_reserve_mib")
+        if isinstance(field, bool) or not isinstance(field, int):
+            return 0
+        raw = str(field)
+    try:
+        mib = int(raw)
+    except ValueError:
+        return 0
+    if mib <= 0:
+        return 0
+    return mib * 1024 * 1024
+
+
+def _is_mmproj(path: Path) -> bool:
+    name = path.name.lower()
+    return name.startswith("mmproj") and name.endswith(".gguf")
+
+
+def _file_size(path: Path) -> int | None:
+    """Size of a regular file, following a symlink. Missing paths have no size."""
+    try:
+        if not path.is_file():
+            return None
+        return path.stat().st_size
+    except OSError:
+        return None
+
+
+def _memory_plan(profile: Path, model_folder: Path) -> int:
+    """Bytes the pool should hold for the child this profile starts.
+
+    ``--native`` and ``--ple-gguf`` are the shards the child maps. The
+    decode window is that native shard (the log's ``54.8 GB`` is shard 1
+    in decimal GB), so ``--max-context`` is not added again. An mmproj
+    the profile did not open is not charged. ``--vram-reserve-mib`` is
+    added once. Zero means the shards could not be read, and the pool
+    keeps its folder estimate.
+    """
+    data = _read_json(profile) or {}
+    flags = _flag_values(data.get("args"))
+    native = flags.get("--native")
+    ple = flags.get("--ple-gguf")
+    if not native or not ple:
+        return 0
+    base = _config_base(data, profile)
+    paths = [
+        _resolve_config_path(native, base),
+        _resolve_config_path(ple, base),
+    ]
+    for text in flags.values():
+        candidate = _resolve_config_path(text, base)
+        if _is_mmproj(candidate):
+            paths.append(candidate)
+    if _vision_enabled(data):
+        try:
+            children = list(model_folder.iterdir())
+        except OSError:
+            children = []
+        paths.extend(path for path in children if _is_mmproj(path))
+    total = 0
+    seen: set[Path] = set()
+    for path in paths:
+        try:
+            key = path.resolve()
+        except OSError:
+            return 0
+        if key in seen:
+            continue
+        seen.add(key)
+        size = _file_size(path)
+        if size is None:
+            return 0
+        total += size
+    if total <= 0:
+        return 0
+    return total + _vram_reserve_bytes(data, flags)
+
+
+def profile_max_context(model_path: str | Path) -> int | None:
+    """``--max-context`` from the run config in ``model_path``, if it has one.
+
+    This does not start the child and does not read a GGUF header. A
+    folder with no ``strata-*.json`` has no profile window.
+    """
+    config = _run_config(Path(model_path))
+    if config is None:
+        return None
+    raw = _flag_values((_read_json(config) or {}).get("args")).get("--max-context")
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def strata_advertised_context(
+    model_path: object,
+    *,
+    model_format: object,
+    external_engine: object,
+) -> int | None:
+    """The profile window when Strata is the engine for this folder.
+
+    An explicit Splash selection keeps the caller's discovered length.
+    A plain GGUF with no run config returns None.
+    """
+    if external_engine not in (None, "", "strata"):
+        return None
+    if external_engine in (None, "") and model_format != "gguf":
+        return None
+    if not isinstance(model_path, (str, os.PathLike)):
+        return None
+    return profile_max_context(model_path)
+
+
 def _health_max_context(payload: dict[str, Any]) -> int | None:
     return _positive_int(payload.get("max_context"))
 
@@ -1033,8 +1182,8 @@ class StrataEngine(BaseEngine):
         )
 
     def reserved_bytes(self) -> int:
-        """No planned budget until the memory contract is measured."""
-        return 0
+        """Opened shards plus the VRAM reserve. Zero keeps the folder estimate."""
+        return _memory_plan(self._target.profile_path, self._path)
 
     def _group_pids(self) -> list[int]:
         if self._process is None or self._process.poll() is not None:
