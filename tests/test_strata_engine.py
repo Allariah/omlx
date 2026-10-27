@@ -971,6 +971,24 @@ class TestLifecycle:
         assert not _group_alive(group)
         assert engine.get_stats()["running"] is False
 
+    def test_serve_leaves_the_conversation_cache_and_parking_off(self, lifecycle):
+        """The child cannot read available RAM, so oMLX must not enable either."""
+        engine = lifecycle("exit 0\n")
+        command = engine._serve_command(9)
+        assert command[1:] == [
+            "serve",
+            "--profile",
+            str(engine._target.profile_path),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "9",
+            "--quiet",
+        ]
+        flags = [part for part in command if part.startswith("--")]
+        assert flags == ["--profile", "--host", "--port", "--quiet"]
+        assert engine.get_cache_stats() is None
+
     async def test_stop_reaps_an_out_of_group_engine(
         self, tmp_path, lifecycle, monkeypatch
     ):

@@ -1198,6 +1198,12 @@ class StrataEngine(BaseEngine):
         return sum(get_phys_footprint(pid) for pid in pids)
 
     def _serve_command(self, port: int) -> list[str]:
+        """Launcher argv. The profile carries the child's own flags.
+
+        Strata cannot read available RAM, so it refuses session parking
+        and leaves the conversation cache off. This argv does not turn
+        either of those on.
+        """
         return [
             str(self._target.binary.path),
             "serve",
@@ -1610,4 +1616,5 @@ class StrataEngine(BaseEngine):
         }
 
     def get_cache_stats(self) -> dict[str, Any] | None:
+        """No oMLX conversation cache. The child refused parking."""
         return None
