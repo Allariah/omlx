@@ -993,12 +993,48 @@ def _fold_message(message: dict[str, Any]) -> str:
     return text
 
 
+def _arguments_text(arguments: object) -> str:
+    if isinstance(arguments, str):
+        return arguments or "{}"
+    return json.dumps({} if arguments is None else arguments)
+
+
+def _parser_tool_call(call: object) -> dict[str, str] | None:
+    """One OpenAI tool call as the flat dict oMLX's parser expects."""
+    if not isinstance(call, dict):
+        return None
+    function = call.get("function")
+    if not isinstance(function, dict):
+        function = {}
+    name = function.get("name", call.get("name", ""))
+    if not isinstance(name, str):
+        name = ""
+    parsed = {
+        "id": call.get("id") if isinstance(call.get("id"), str) else "",
+        "name": name,
+        "arguments": _arguments_text(
+            function.get("arguments", call.get("arguments", "{}"))
+        ),
+    }
+    if not parsed["name"] and parsed["arguments"] == "{}":
+        return None
+    return parsed
+
+
+def _parser_tool_calls(calls: object) -> list[dict[str, str]] | None:
+    if not isinstance(calls, list):
+        return None
+    parsed = [call for item in calls if (call := _parser_tool_call(item))]
+    return parsed or None
+
+
 class _StrataStream:
     """One Strata event stream, folded the way Splash folds a choice."""
 
     def __init__(self) -> None:
         self.text = ""
         self.in_think = False
+        self.calls: dict[int, dict[str, str]] = {}
         self.usage: dict[str, Any] = {}
         self.finish_reason = "stop"
         self.first_token_at: float | None = None
@@ -1015,8 +1051,40 @@ class _StrataStream:
         if isinstance(content, str) and content:
             piece += ("</think>" if self.in_think else "") + content
             self.in_think = False
+        for call in delta.get("tool_calls") or []:
+            if not isinstance(call, dict):
+                continue
+            index = call.get("index", 0)
+            if isinstance(index, bool) or not isinstance(index, int):
+                index = 0
+            slot = self.calls.setdefault(
+                index, {"id": "", "name": "", "arguments": ""}
+            )
+            if isinstance(call.get("id"), str) and call["id"]:
+                slot["id"] = call["id"]
+            function = call.get("function")
+            if not isinstance(function, dict):
+                function = {}
+            name = function.get("name") or ""
+            arguments = function.get("arguments") or ""
+            if isinstance(name, str):
+                slot["name"] += name
+            if isinstance(arguments, str):
+                slot["arguments"] += arguments
         self.text += piece
         return piece, bool(piece)
+
+    def tool_calls(self) -> list[dict[str, str]] | None:
+        calls = [
+            {
+                "id": slot["id"],
+                "name": slot["name"],
+                "arguments": slot["arguments"] or "{}",
+            }
+            for _, slot in sorted(self.calls.items())
+            if slot["name"] or slot["arguments"]
+        ]
+        return calls or None
 
     def finish(self) -> GenerationOutput:
         closing = "</think>" if self.in_think else ""
@@ -1032,6 +1100,7 @@ class _StrataStream:
             prompt_tokens=_as_int(self.usage.get("prompt_tokens")),
             completion_tokens=_as_int(self.usage.get("completion_tokens")),
             cached_tokens=_as_int(cached),
+            tool_calls=self.tool_calls(),
             first_token_at=self.first_token_at,
             generated_until=time.perf_counter(),
         )
@@ -1053,6 +1122,7 @@ def _chat_output(payload: dict[str, Any]) -> GenerationOutput:
         prompt_tokens=_as_int(usage.get("prompt_tokens")),
         completion_tokens=_as_int(usage.get("completion_tokens")),
         cached_tokens=_as_int(cached),
+        tool_calls=_parser_tool_calls(message.get("tool_calls")),
     )
 
 
@@ -1120,6 +1190,8 @@ class StrataEngine(BaseEngine):
     """
 
     external_engine_id = "strata"
+    # The child accepts OpenAI tool definitions on the chat body.
+    supports_tool_calling = True
     # Strata holds its own memory. There is no oMLX scheduler to resize.
     _prefill_memory_guard_managed_externally = True
 
@@ -1398,8 +1470,10 @@ class StrataEngine(BaseEngine):
     ) -> int:
         # The chat route counts before chat() or stream_chat(). Strata
         # tokenizes the messages; the placeholder encode() is not a BPE.
-        del tools, chat_template_kwargs, is_partial
+        del chat_template_kwargs, is_partial
         body: dict[str, Any] = {"messages": list(messages or [])}
+        if tools:
+            body["tools"] = tools
         model = self._child_model_name()
         if model:
             body["model"] = model
@@ -1440,6 +1514,7 @@ class StrataEngine(BaseEngine):
         presence_penalty: float,
         kwargs: dict[str, Any],
         stream: bool,
+        tools: list[dict] | None = None,
     ) -> dict[str, Any]:
         """The chat body Strata reads. Splash-only fields stay off it."""
         top_k_value = top_k
@@ -1477,6 +1552,8 @@ class StrataEngine(BaseEngine):
         budget = kwargs.get("thinking_budget")
         if isinstance(budget, int) and not isinstance(budget, bool):
             body["thinking_budget_tokens"] = budget
+        if tools:
+            body["tools"] = tools
         if stream:
             # Strata puts usage on the last chunk either way. Asking for it
             # matches Splash, and a caller can ask for prefill progress.
@@ -1515,7 +1592,6 @@ class StrataEngine(BaseEngine):
         tools: list[dict] | None = None,
         **kwargs: Any,
     ) -> GenerationOutput:
-        del tools
         body = self._request_body(
             messages,
             max_tokens=max_tokens,
@@ -1527,6 +1603,7 @@ class StrataEngine(BaseEngine):
             presence_penalty=presence_penalty,
             kwargs=kwargs,
             stream=False,
+            tools=tools,
         )
         return _chat_output(await self._post_chat(body))
 
@@ -1591,7 +1668,6 @@ class StrataEngine(BaseEngine):
         tools: list[dict] | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[GenerationOutput]:
-        del tools
         body = self._request_body(
             messages,
             max_tokens=max_tokens,
@@ -1603,6 +1679,7 @@ class StrataEngine(BaseEngine):
             presence_penalty=presence_penalty,
             kwargs=kwargs,
             stream=True,
+            tools=tools,
         )
         async for output in self._stream(body):
             yield output
