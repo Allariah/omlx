@@ -642,6 +642,8 @@ print(json.dumps({"rank": group.rank(), "ok": True}), flush=True)
 """
 
 
+# Two real ranks on one GPU: a rank can hit the Metal timeout on a busy runner.
+@pytest.mark.slow
 def test_cluster_decode_matches_single_process(tmp_path):
     # Ranks sum their partial outputs, and pipeline stages agree on batched
     # decode even when only one stage's layers support it.

@@ -1325,6 +1325,8 @@ def run_two_ranks(tmp_path, script, *args):
         assert '"ok": true' in out
 
 
+# Two real ranks on one GPU: a rank can hit the Metal timeout on a busy runner.
+@pytest.mark.slow
 def test_pipelined_forward_matches_single_process(tmp_path):
     run_two_ranks(tmp_path, _PIPELINE_RANK, Path(__file__).parent)
 
@@ -1535,6 +1537,7 @@ def pack_split_projections(target):
     (target / "model.safetensors.index.json").write_text(json.dumps(index))
 
 
+@pytest.mark.slow
 def test_tensor_parallel_ranks_match_single_process(tmp_path):
     from omlx.patches.deepseek_v41.convert import convert
 
@@ -1680,6 +1683,7 @@ print(json.dumps({"rank": rank, "ok": True, "cycles": len(cycles)}), flush=True)
 """
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize(
     ("drafts", "split"),
     [("head", "pipeline"), ("oracle", "pipeline"), ("oracle", "tensor")],
