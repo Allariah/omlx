@@ -1441,8 +1441,6 @@ async def _apply_memory_guard_tier_runtime(
 
 async def _apply_cache_settings_runtime(
     enabled: bool | None,
-    ssd_cache_dir: str | None,
-    ssd_cache_max_size: str | None,
     global_settings,
     hot_cache_max_size: str | None = None,
 ) -> tuple[bool, str]:
@@ -1482,51 +1480,22 @@ async def _apply_cache_settings_runtime(
         global_settings.cache.initial_cache_blocks
     )
 
-    pool._scheduler_config.paged_ssd_cache_auto_size = (
-        ssd_cache_max_size or global_settings.cache.ssd_cache_max_size
-    ).lower() == "auto"
-
     # Update scheduler config based on cache settings
     if enabled is False or (enabled is None and not global_settings.cache.enabled):
         pool._scheduler_config.paged_ssd_cache_dir = None
         pool._scheduler_config.paged_ssd_cache_max_size = 0
     else:
-        # Cache is enabled
-        if ssd_cache_dir is not None:
-            pool._scheduler_config.paged_ssd_cache_dir = ssd_cache_dir
-        elif global_settings.cache.ssd_cache_dir:
-            pool._scheduler_config.paged_ssd_cache_dir = (
-                global_settings.cache.ssd_cache_dir
-            )
-        else:
-            # Use default cache dir
-            pool._scheduler_config.paged_ssd_cache_dir = str(
-                global_settings.cache.get_ssd_cache_dir(global_settings.base_path)
-            )
-
-        if ssd_cache_max_size is not None:
-            # Handle "auto" value
-            if ssd_cache_max_size.lower() == "auto":
-                pool._scheduler_config.paged_ssd_cache_max_size = (
-                    global_settings.cache.get_ssd_cache_max_size_bytes(
-                        global_settings.base_path
-                    )
-                )
-            else:
-                pool._scheduler_config.paged_ssd_cache_max_size = parse_size(
-                    ssd_cache_max_size
-                )
-        elif global_settings.cache.ssd_cache_max_size:
-            # Use settings value (handles "auto")
-            pool._scheduler_config.paged_ssd_cache_max_size = (
-                global_settings.cache.get_ssd_cache_max_size_bytes(
-                    global_settings.base_path
-                )
-            )
-        elif global_settings.cache.ssd_cache_max_size:
-            pool._scheduler_config.paged_ssd_cache_max_size = parse_size(
-                global_settings.cache.ssd_cache_max_size
-            )
+        # global_settings already holds the requested dir and size.
+        cache_cfg = global_settings.cache
+        pool._scheduler_config.paged_ssd_cache_dir = str(
+            cache_cfg.get_ssd_cache_dir(global_settings.base_path)
+        )
+        pool._scheduler_config.paged_ssd_cache_max_size = (
+            cache_cfg.get_ssd_cache_max_size_bytes(global_settings.base_path)
+        )
+        pool._scheduler_config.paged_ssd_cache_auto_size = (
+            cache_cfg.is_ssd_cache_auto_size()
+        )
 
     # Apply hot cache max size
     if hot_cache_max_size is not None:
@@ -5329,14 +5298,14 @@ async def update_global_settings(
             global_settings.cache.enabled = request.cache_enabled
             cache_changed = True
     if request.ssd_cache_dir is not None:
-        requested_cache_dir = (
-            Path(request.ssd_cache_dir).expanduser().resolve()
-            if request.ssd_cache_dir
+        # Compare against the configured dir, not the fallback dir in use.
+        requested_cache_dir, configured_cache_dir = (
+            Path(value).expanduser().resolve()
+            if value
             else (global_settings.base_path / "cache").resolve()
+            for value in (request.ssd_cache_dir, global_settings.cache.ssd_cache_dir)
         )
-        if requested_cache_dir != global_settings.cache.get_ssd_cache_dir(
-            global_settings.base_path
-        ).resolve():
+        if requested_cache_dir != configured_cache_dir:
             global_settings.cache.ssd_cache_dir = request.ssd_cache_dir
             cache_changed = True
     if request.ssd_cache_max_size is not None:
@@ -5409,8 +5378,6 @@ async def update_global_settings(
     if cache_changed:
         success, msg = await _apply_cache_settings_runtime(
             request.cache_enabled,
-            request.ssd_cache_dir,
-            request.ssd_cache_max_size,
             global_settings,
             hot_cache_max_size=request.hot_cache_max_size,
         )
