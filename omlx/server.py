@@ -4871,6 +4871,11 @@ def _extract_chat_messages(
     max_tool_result_tokens: int | None,
 ) -> _ChatTemplateMessages:
     """Convert request messages into the dicts the engine chat template takes."""
+    # An engine that will not read images must say so before text extraction
+    # drops the parts and the request looks like it succeeded.
+    refuse_images = getattr(engine, "refuse_unsupported_images", None)
+    if callable(refuse_images):
+        refuse_images(request.messages)
     # Extract messages - different engines need different content handling.
     # Templates that expose message.reasoning_content natively (Qwen 3.6+)
     # get reasoning as a separate field; others fall back to <think> inlined
@@ -8496,6 +8501,9 @@ async def create_response(
         lease.limit_gpu_power(_resolve_gpu_power_limit(request, request.model))
 
         resolved_model = _serving_model_id(lease, request.model)
+        refuse_images = getattr(engine, "refuse_unsupported_images", None)
+        if callable(refuse_images):
+            refuse_images(request.input, field="input")
 
         # Images in function_call_output lists survive only for engines that
         # can extract them; text engines get a placeholder instead so base64

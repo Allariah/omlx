@@ -334,6 +334,112 @@ def _sse_line(payload: dict) -> str:
     return f"data: {json.dumps(payload)}\n\n"
 
 
+class TestImages:
+    def _image_message(self) -> list[dict]:
+        return [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "what is this"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,aaaa"},
+                    },
+                ],
+            }
+        ]
+
+    async def test_vision_off_rejects_an_image(self, tmp_path):
+        engine = _engine(tmp_path, "http://strata")
+        assert engine.accepts_image_input is False
+        with pytest.raises(InvalidRequestError, match="vision is off"):
+            await engine.chat(self._image_message())
+
+    async def test_vision_on_forwards_the_image(self, tmp_path):
+        seen: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {"content": "a dot"},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 3, "completion_tokens": 2},
+                },
+            )
+
+        engine = _mock_engine(tmp_path, handler)
+        profile = json.loads(engine._target.profile_path.read_text())
+        profile["ui_vision_enabled"] = True
+        engine._target.profile_path.write_text(json.dumps(profile))
+        messages = self._image_message()
+
+        output = await engine.chat(messages)
+
+        assert engine.accepts_image_input is True
+        assert seen["body"]["messages"] == messages
+        assert output.text == "a dot"
+
+    def test_the_route_rejects_an_image_before_the_child(self, tmp_path, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        import omlx.server as srv
+
+        seen: list[str] = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                seen.append(self.path)
+                length = int(self.headers.get("Content-Length") or 0)
+                self.rfile.read(length)
+                body = json.dumps({"input_tokens": 1}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_args):
+                return
+
+        with _Server(Handler) as server:
+            engine = _engine(tmp_path, server.url)
+            pool = MagicMock()
+            pool.preload_pinned_models = AsyncMock()
+            pool.check_ttl_expirations = AsyncMock()
+            pool.shutdown = AsyncMock()
+            pool.get_entry.return_value = None
+            monkeypatch.setattr(srv._server_state, "engine_pool", pool)
+            monkeypatch.setattr(
+                srv, "get_engine_for_model", AsyncMock(return_value=engine)
+            )
+            monkeypatch.setattr(srv, "resolve_model_id", lambda name: name)
+            monkeypatch.setattr(srv, "get_model_settings_for_request", lambda name: None)
+            monkeypatch.setitem(
+                srv.app.dependency_overrides,
+                srv.verify_inference_api_key,
+                lambda: True,
+            )
+            with TestClient(srv.app, raise_server_exceptions=False) as client:
+                response = client.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "flash",
+                        "stream": False,
+                        "messages": self._image_message(),
+                    },
+                )
+
+        assert response.status_code == 400, response.text
+        assert "vision is off" in response.json()["error"]["message"]
+        assert seen == []
+
+
 class TestStream:
     async def test_stream_yields_deltas_then_usage(self, tmp_path):
         seen: dict = {}

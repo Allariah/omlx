@@ -71,6 +71,7 @@ _REQUEST_UNAVAILABLE = (
 )
 _MAX_TOP_K = 64
 _MAX_STOP = 4
+_IMAGE_PART_TYPES = frozenset({"image", "image_url", "input_image"})
 
 
 @dataclass(frozen=True)
@@ -993,6 +994,23 @@ def _fold_message(message: dict[str, Any]) -> str:
     return text
 
 
+def _contains_image(value: object, depth: int = 0) -> bool:
+    """True when ``value`` carries an image content part."""
+    if depth > 8 or value is None or isinstance(value, str):
+        return False
+    if isinstance(value, dict):
+        kind = value.get("type")
+        if isinstance(kind, str) and kind in _IMAGE_PART_TYPES:
+            return True
+        return _contains_image(value.get("content"), depth + 1)
+    if isinstance(value, list):
+        return any(_contains_image(item, depth + 1) for item in value)
+    kind = getattr(value, "type", None)
+    if isinstance(kind, str) and kind in _IMAGE_PART_TYPES:
+        return True
+    return _contains_image(getattr(value, "content", None), depth + 1)
+
+
 def _arguments_text(arguments: object) -> str:
     if isinstance(arguments, str):
         return arguments or "{}"
@@ -1230,6 +1248,24 @@ class StrataEngine(BaseEngine):
     @property
     def log_path(self) -> Path:
         return self._log_path
+
+    @property
+    def accepts_image_input(self) -> bool:
+        """Image parts reach the child only when the profile enabled vision."""
+        data = _read_json(self._target.profile_path) or {}
+        return _vision_enabled(data)
+
+    def refuse_unsupported_images(self, messages: object, *, field: str = "messages") -> None:
+        """Reject an image while this profile's vision switch is off.
+
+        The folder can still contain an mmproj. This serve did not open it.
+        """
+        if self.accepts_image_input or not _contains_image(messages):
+            return
+        raise InvalidRequestError(
+            "Strata vision is off for this model, so image input is not accepted.",
+            field=field,
+        )
 
     @property
     def max_context_tokens(self) -> int | None:
@@ -1471,6 +1507,7 @@ class StrataEngine(BaseEngine):
         # The chat route counts before chat() or stream_chat(). Strata
         # tokenizes the messages; the placeholder encode() is not a BPE.
         del chat_template_kwargs, is_partial
+        self.refuse_unsupported_images(messages)
         body: dict[str, Any] = {"messages": list(messages or [])}
         if tools:
             body["tools"] = tools
@@ -1592,6 +1629,7 @@ class StrataEngine(BaseEngine):
         tools: list[dict] | None = None,
         **kwargs: Any,
     ) -> GenerationOutput:
+        self.refuse_unsupported_images(messages)
         body = self._request_body(
             messages,
             max_tokens=max_tokens,
@@ -1668,6 +1706,7 @@ class StrataEngine(BaseEngine):
         tools: list[dict] | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[GenerationOutput]:
+        self.refuse_unsupported_images(messages)
         body = self._request_body(
             messages,
             max_tokens=max_tokens,
