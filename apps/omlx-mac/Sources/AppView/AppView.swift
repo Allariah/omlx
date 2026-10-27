@@ -198,9 +198,13 @@ private struct UpdateConfirmationSheet: View {
                             comment: "Update confirmation sheet title; placeholder is the version"))
                     .font(.omlxText(DesignTokens.FontSize.title2, weight: .semibold))
                     .foregroundStyle(theme.text)
-                Text(String(localized: "update.confirm.subtitle",
-                            defaultValue: "Review the release notes before downloading and relaunching.",
-                            comment: "Subtitle for the update confirmation sheet"))
+                Text(isStaged
+                     ? String(localized: "update.confirm.subtitle_ready",
+                              defaultValue: "The update is downloaded. Review the release notes before relaunching.",
+                              comment: "Subtitle for the update confirmation sheet when the update is already downloaded")
+                     : String(localized: "update.confirm.subtitle",
+                              defaultValue: "Review the release notes before downloading and relaunching.",
+                              comment: "Subtitle for the update confirmation sheet"))
                     .font(.omlxText(DesignTokens.FontSize.callout))
                     .foregroundStyle(theme.textSecondary)
             }
@@ -263,9 +267,13 @@ private struct UpdateConfirmationSheet: View {
                         .font(.omlxText(DesignTokens.FontSize.subheadline))
                         .foregroundStyle(theme.redDot)
                 }
-                Text(String(localized: "update.confirm.size",
-                            defaultValue: "Download size: \(update.sizeText ?? "Unknown")",
-                            comment: "Update confirmation download size line; placeholder is a formatted byte size or Unknown"))
+                Text(isStaged
+                     ? String(localized: "update.confirm.downloaded",
+                              defaultValue: "Downloaded and ready to install",
+                              comment: "Update confirmation footer line when the update is already downloaded")
+                     : String(localized: "update.confirm.size",
+                              defaultValue: "Download size: \(update.sizeText ?? "Unknown")",
+                              comment: "Update confirmation download size line; placeholder is a formatted byte size or Unknown"))
                     .font(.omlxText(DesignTokens.FontSize.subheadline))
                     .foregroundStyle(theme.textSecondary)
                 Text(String(localized: "update.confirm.restart_notice",

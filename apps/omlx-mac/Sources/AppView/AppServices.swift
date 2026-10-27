@@ -67,6 +67,8 @@ final class AppServices: NSObject {
         // Wire Sparkle (or its stub) on the next runloop so any user prefs
         // saved on disk are applied before the first background check.
         DispatchQueue.main.async { [weak self] in
+            // The test host would otherwise check and download real releases.
+            guard !MenubarController.isRunningUnitTests else { return }
             self?.updates.bootstrap()
         }
     }

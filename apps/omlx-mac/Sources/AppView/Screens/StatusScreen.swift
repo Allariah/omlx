@@ -634,11 +634,24 @@ private struct UpdatesSection: View {
                 ))
             }
             Row(
+                label: String(localized: "status.updates.background_download",
+                              defaultValue: "Download Automatically",
+                              comment: "Row label for the toggle that downloads found updates in the background"),
+                sublabel: String(localized: "status.updates.background_download.sub",
+                                 defaultValue: "Download in the background, then ask before installing",
+                                 comment: "Sublabel for the background update download toggle")
+            ) {
+                RowSwitch(isOn: Binding(
+                    get: { updates.backgroundDownload },
+                    set: { updates.backgroundDownload = $0 }
+                ))
+            }
+            Row(
                 label: String(localized: "status.updates.auto_download",
                               defaultValue: "Notify About Updates",
                               comment: "Row label for the automatic update notification toggle"),
                 sublabel: String(localized: "status.updates.auto_download.sub",
-                                 defaultValue: "Show release notes before downloading in the background",
+                                 defaultValue: "Show the release notes when an update is found",
                                  comment: "Sublabel for the automatic update notification toggle"),
                 isLast: true
             ) {
