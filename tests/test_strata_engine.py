@@ -837,11 +837,11 @@ class TestDispatch:
     def test_chat_completion_refuses_instead_of_500(
         self, tmp_path, monkeypatch, stream
     ):
-        """Chat dies as the not-implemented error, not a missing-method 500.
+        """A chat with no child dies as a 400, not a missing-method 500.
 
-        The admin page counts tokens before ``chat()``. A Strata engine
-        without that method used to raise AttributeError, which the
-        unhandled-exception middleware turned into "Internal server error".
+        The admin page counts tokens before ``chat()``. That count is a
+        POST to the child ``start()`` created. With no child, the route
+        stays a 400 instead of an unhandled 500.
         """
         from fastapi.testclient import TestClient
 
@@ -884,10 +884,7 @@ class TestDispatch:
 
         assert response.status_code == 400, response.text
         assert response.json()["error"] == {
-            "message": (
-                "Strata cannot serve this request yet: "
-                "chat translation is not implemented"
-            ),
+            "message": "Strata engine is not started",
             "type": "invalid_request_error",
             "param": None,
             "code": None,

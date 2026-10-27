@@ -804,6 +804,22 @@ def _watchdog_command(command: list[str]) -> list[str]:
     return ["/bin/sh", "-c", script, "strata-watchdog", str(os.getpid()), *command]
 
 
+def _strata_error_message(response: httpx.Response) -> str:
+    """``error.message`` from a Strata JSON body, or the response text."""
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict):
+            message = error.get("message")
+            if isinstance(message, str) and message:
+                return message
+    text = response.text.strip()
+    return text or f"Strata returned HTTP {response.status_code}"
+
+
 def _failure_summary(path: Path, offset: int) -> str:
     try:
         with open(path, "rb") as log:
@@ -998,15 +1014,57 @@ class StrataEngine(BaseEngine):
     def _refuse_request(self) -> None:
         raise InvalidRequestError(_REQUEST_UNAVAILABLE)
 
+    def _child_model_name(self) -> str:
+        """The model id the child serves, from the run config's ``model_name``."""
+        data = _read_json(self._target.profile_path) or {}
+        name = data.get("model_name")
+        return name if isinstance(name, str) and name else ""
+
+    def _post_sync(self, path: str, body: dict[str, Any]) -> httpx.Response:
+        """POST ``path`` with the bearer key from the readiness client.
+
+        The chat route calls ``count_chat_tokens`` synchronously on the
+        server loop, so this cannot await that async client. The URL and
+        the key are the ones ``GET /v1/models`` already uses.
+        """
+        client = self._client
+        if client is None:
+            raise InvalidRequestError("Strata engine is not started")
+        headers: dict[str, str] = {}
+        auth = client.headers.get("authorization")
+        if auth:
+            headers["Authorization"] = auth
+        try:
+            with httpx.Client(
+                base_url=client.base_url,
+                headers=headers,
+                timeout=REQUEST_TIMEOUT_SECONDS,
+            ) as sync:
+                return sync.post(path, json=body)
+        except httpx.HTTPError as exc:
+            raise InvalidRequestError(str(exc)) from exc
+
     def count_chat_tokens(
         self, messages, tools=None, chat_template_kwargs=None, is_partial=None
     ) -> int:
-        # The chat route counts before chat() or stream_chat(). Counting
-        # would translate the messages, so refuse here and let those calls
-        # share this error before a stream is committed.
-        del messages, tools, chat_template_kwargs, is_partial
-        self._refuse_request()
-        raise AssertionError("unreachable")
+        # The chat route counts before chat() or stream_chat(). Strata
+        # tokenizes the messages; the placeholder encode() is not a BPE.
+        del tools, chat_template_kwargs, is_partial
+        body: dict[str, Any] = {"messages": list(messages or [])}
+        model = self._child_model_name()
+        if model:
+            body["model"] = model
+        response = self._post_sync("/v1/messages/count_tokens", body)
+        if response.status_code != 200:
+            raise InvalidRequestError(_strata_error_message(response))
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise InvalidRequestError("Strata token count was not JSON") from exc
+        count = payload.get("input_tokens") if isinstance(payload, dict) else None
+        if isinstance(count, bool) or not isinstance(count, int):
+            raise InvalidRequestError("Strata token count did not include input_tokens")
+        return count
 
     async def generate(self, prompt: str | list[int], **kwargs: Any) -> GenerationOutput:
         del prompt, kwargs
