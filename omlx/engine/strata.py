@@ -833,6 +833,50 @@ def _fold_message(message: dict[str, Any]) -> str:
     return text
 
 
+class _StrataStream:
+    """One Strata event stream, folded the way Splash folds a choice."""
+
+    def __init__(self) -> None:
+        self.text = ""
+        self.in_think = False
+        self.usage: dict[str, Any] = {}
+        self.finish_reason = "stop"
+        self.first_token_at: float | None = None
+
+    def add_choice(self, choice: dict[str, Any]) -> tuple[str, bool]:
+        self.finish_reason = choice.get("finish_reason") or self.finish_reason
+        delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
+        piece = ""
+        reasoning = delta.get("reasoning_content") or ""
+        content = delta.get("content") or ""
+        if isinstance(reasoning, str) and reasoning:
+            piece += ("" if self.in_think else "<think>") + reasoning
+            self.in_think = True
+        if isinstance(content, str) and content:
+            piece += ("</think>" if self.in_think else "") + content
+            self.in_think = False
+        self.text += piece
+        return piece, bool(piece)
+
+    def finish(self) -> GenerationOutput:
+        closing = "</think>" if self.in_think else ""
+        self.in_think = False
+        self.text += closing
+        details = self.usage.get("prompt_tokens_details")
+        cached = details.get("cached_tokens") if isinstance(details, dict) else 0
+        return GenerationOutput(
+            text=self.text,
+            new_text=closing,
+            finished=True,
+            finish_reason=self.finish_reason,
+            prompt_tokens=_as_int(self.usage.get("prompt_tokens")),
+            completion_tokens=_as_int(self.usage.get("completion_tokens")),
+            cached_tokens=_as_int(cached),
+            first_token_at=self.first_token_at,
+            generated_until=time.perf_counter(),
+        )
+
+
 def _chat_output(payload: dict[str, Any]) -> GenerationOutput:
     choices = payload.get("choices") or []
     choice = choices[0] if choices and isinstance(choices[0], dict) else {}
@@ -1176,6 +1220,12 @@ class StrataEngine(BaseEngine):
         budget = kwargs.get("thinking_budget")
         if isinstance(budget, int) and not isinstance(budget, bool):
             body["thinking_budget_tokens"] = budget
+        if stream:
+            # Strata puts usage on the last chunk either way. Asking for it
+            # matches Splash, and a caller can ask for prefill progress.
+            body["stream_options"] = {"include_usage": True}
+            if kwargs.get("return_progress"):
+                body["return_progress"] = True
         return body
 
     async def _post_chat(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -1223,12 +1273,81 @@ class StrataEngine(BaseEngine):
         )
         return _chat_output(await self._post_chat(body))
 
+    async def _stream(self, body: dict[str, Any]) -> AsyncIterator[GenerationOutput]:
+        if self._client is None:
+            raise InvalidRequestError("Strata engine is not started")
+        state = _StrataStream()
+        try:
+            async with self._client.stream(
+                "POST", "/v1/chat/completions", json=body
+            ) as response:
+                if response.status_code != 200:
+                    await response.aread()
+                    raise RuntimeError(
+                        f"Strata returned HTTP {response.status_code}"
+                    )
+                async for line in response.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data)
+                    except ValueError:
+                        continue
+                    if not isinstance(chunk, dict):
+                        continue
+                    usage = chunk.get("usage")
+                    if isinstance(usage, dict):
+                        state.usage = usage
+                    for choice in chunk.get("choices") or []:
+                        if not isinstance(choice, dict):
+                            continue
+                        piece, produced = state.add_choice(choice)
+                        if not produced:
+                            continue
+                        now = time.perf_counter()
+                        state.first_token_at = state.first_token_at or now
+                        yield GenerationOutput(
+                            text=state.text,
+                            new_text=piece,
+                            finished=False,
+                            first_token_at=state.first_token_at,
+                            generated_at=now,
+                        )
+        except httpx.HTTPError as exc:
+            raise RuntimeError(str(exc)) from exc
+        yield state.finish()
+
     async def stream_chat(
-        self, messages: list[dict[str, Any]], **kwargs: Any
+        self,
+        messages: list[dict[str, Any]],
+        max_tokens: int = 256,
+        temperature: float = 0.7,
+        top_p: float = 0.9,
+        top_k: int = 0,
+        min_p: float = 0.0,
+        repetition_penalty: float = 1.0,
+        presence_penalty: float = 0.0,
+        tools: list[dict] | None = None,
+        **kwargs: Any,
     ) -> AsyncIterator[GenerationOutput]:
-        del messages, kwargs
-        self._refuse_request()
-        yield GenerationOutput(text="", tokens=[], finished=True)
+        del tools
+        body = self._request_body(
+            messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            min_p=min_p,
+            repetition_penalty=repetition_penalty,
+            presence_penalty=presence_penalty,
+            kwargs=kwargs,
+            stream=True,
+        )
+        async for output in self._stream(body):
+            yield output
 
     def get_stats(self) -> dict[str, Any]:
         running = self._process is not None and self._process.poll() is None

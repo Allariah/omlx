@@ -254,3 +254,66 @@ class TestChat:
         assert output.text == "<think>hmm</think>"
         assert output.finish_reason == "length"
         assert output.cached_tokens == 0
+
+
+def _sse_line(payload: dict) -> str:
+    return f"data: {json.dumps(payload)}\n\n"
+
+
+class TestStream:
+    async def test_stream_yields_deltas_then_usage(self, tmp_path):
+        seen: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["body"] = json.loads(request.content)
+            raw = (
+                ": keep-alive\n\n"
+                + _sse_line({"choices": [{"delta": {"reasoning_content": "hmm"}}]})
+                + _sse_line({"choices": [{"delta": {"content": "Hi"}}]})
+                + ": keep-alive\n\n"
+                + _sse_line(
+                    {
+                        "choices": [{"delta": {}, "finish_reason": "stop"}],
+                        "usage": {
+                            "prompt_tokens": 7,
+                            "completion_tokens": 3,
+                            "total_tokens": 10,
+                            "prompt_tokens_details": {"cached_tokens": 4},
+                        },
+                    }
+                )
+                + "data: [DONE]\n\n"
+                + _sse_line({"choices": [{"delta": {"content": "after"}}]})
+            )
+            return httpx.Response(200, content=raw.encode())
+
+        engine = _mock_engine(tmp_path, handler)
+        outputs = [
+            item
+            async for item in engine.stream_chat(
+                [{"role": "user", "content": "hi"}],
+                max_tokens=16,
+                return_progress=True,
+            )
+        ]
+
+        body = seen["body"]
+        assert body["stream"] is True
+        assert body["model"] == "qwen3.8-flash-next-iq3_s"
+        assert body["stream_options"] == {"include_usage": True}
+        assert body["return_progress"] is True
+        assert [item.new_text for item in outputs if not item.finished] == [
+            "<think>hmm",
+            "</think>Hi",
+        ]
+        assert all(item.text.endswith(item.new_text) for item in outputs if not item.finished)
+        final = outputs[-1]
+        assert final.finished
+        assert final.text == "<think>hmm</think>Hi"
+        assert "after" not in final.text
+        assert final.finish_reason == "stop"
+        assert (
+            final.prompt_tokens,
+            final.completion_tokens,
+            final.cached_tokens,
+        ) == (7, 3, 4)
