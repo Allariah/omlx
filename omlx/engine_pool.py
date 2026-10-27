@@ -2529,6 +2529,14 @@ class EnginePool:
         engine_id = getattr(engine, "external_engine_id", None)
         return isinstance(engine_id, str) and engine_id in EXTERNAL_ENGINES
 
+    @staticmethod
+    def _external_engine_label(engine: object) -> str:
+        """Display name of the external engine that served ``engine``."""
+        engine_id = getattr(engine, "external_engine_id", None)
+        if isinstance(engine_id, str) and engine_id in EXTERNAL_ENGINES:
+            return EXTERNAL_ENGINES[engine_id]
+        return "external"
+
     def external_process_memory_bytes(self) -> int:
         """Memory held by models that run in their own processes."""
         engines = [entry.engine for entry in list(self._entries.values())]
@@ -3940,6 +3948,15 @@ class EnginePool:
         for _ in range(5):
             await asyncio.sleep(0)
 
+        # Name the serving engine before its reference is cleared.
+        served_by = ""
+        if external:
+            served_by = (
+                "distributed"
+                if distributed
+                else self._external_engine_label(entry.engine)
+            )
+
         # Clear engine reference before settle barrier
         entry.engine = None
         entry.last_access = 0.0
@@ -3952,19 +3969,18 @@ class EnginePool:
         entry.runtime_settle_size = None
 
         if external:
-            # Cluster weights live in supervised rank processes and Splash's
-            # in its server process, not this process's Metal allocator.
-            # Successful process teardown is the memory barrier; polling
-            # mx.get_active_memory() here would wait against an unrelated
-            # gauge and then run emergency reclaim.
+            # Cluster weights live in supervised rank processes, and an
+            # external engine's weights live in its own process, not this
+            # process's Metal allocator. Successful process teardown is the
+            # memory barrier; polling mx.get_active_memory() here would wait
+            # against an unrelated gauge and then run emergency reclaim.
             gc.collect()
             self._current_model_memory = max(
                 0,
                 self._current_model_memory - resident_size,
             )
-            kind = "distributed" if distributed else "Splash"
             logger.info(
-                f"Unloaded {kind} model: {model_id}, released its process "
+                f"Unloaded {served_by} model: {model_id}, released its process "
                 f"({format_size(resident_size)} planned)"
             )
             self._wake_process_memory_enforcer()

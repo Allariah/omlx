@@ -7,6 +7,7 @@ for ``strata serve``, the way Splash's lifecycle tests stand in for Splash.
 
 import asyncio
 import json
+import logging
 import os
 import signal
 import stat
@@ -1160,3 +1161,37 @@ class TestLifecycle:
         stop.assert_awaited_once()
         mx.get_active_memory.assert_not_called()
         assert entry.engine is None
+
+    async def test_unload_names_the_engine_that_served_the_model(
+        self, tmp_path, global_settings, caplog
+    ):
+        """Unloading a Strata model must not be logged as Splash."""
+        binary = _fake_launcher(tmp_path / "strata")
+        global_settings.integrations.strata_path = str(binary)
+        pool, entry = _pool(tmp_path)
+        _write_pack(Path(entry.model_path), exe=binary)
+        pool._get_final_ceiling = lambda: 0
+        manager = MagicMock()
+        manager.get_settings.return_value = ModelSettings(external_engine="strata")
+        pool._settings_manager = manager
+
+        async def fake_start(self):
+            return None
+
+        with (
+            patch.object(StrataEngine, "start", fake_start),
+            patch.object(StrataEngine, "stop", AsyncMock()),
+        ):
+            await pool._load_engine(entry.model_id)
+            with (
+                caplog.at_level(logging.INFO, logger="omlx.engine_pool"),
+                patch("omlx.engine_pool.mx"),
+            ):
+                await pool._unload_engine(entry.model_id)
+
+        assert "Unloaded Splash model" not in caplog.text
+        assert (
+            f"Unloaded Strata model: {entry.model_id}, released its process ("
+            in caplog.text
+        )
+        assert "planned)" in caplog.text
