@@ -454,6 +454,35 @@ class TestImages:
         assert "vision is off" in response.json()["error"]["message"]
         assert seen == []
 
+    async def test_anthropic_messages_refuse_an_image(self, tmp_path, monkeypatch):
+        """The messages route uses the same vision refusal as chat completions."""
+        import omlx.server as srv
+        from omlx.api.anthropic_models import MessagesRequest
+
+        engine = _engine(tmp_path, "http://strata")
+        monkeypatch.setattr(srv, "get_engine_for_model", AsyncMock(return_value=engine))
+        request = MessagesRequest(
+            model="flash",
+            max_tokens=8,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": "aaaa",
+                            },
+                        }
+                    ],
+                }
+            ],
+        )
+        with pytest.raises(InvalidRequestError, match="vision is off"):
+            await srv.create_anthropic_message(request, MagicMock(), True)
+
 
 class TestStream:
     async def test_stream_yields_deltas_then_usage(self, tmp_path):

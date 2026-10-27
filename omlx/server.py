@@ -7756,6 +7756,11 @@ async def create_anthropic_message(
     lease = _LLMEngineLease()
     try:
         engine = await get_engine_for_model(request.model, lease=lease)
+        # Chat completions refuse an image before extraction drops it.
+        # Conversion here would drop the parts and skip that 400.
+        refuse_images = getattr(engine, "refuse_unsupported_images", None)
+        if callable(refuse_images):
+            refuse_images(request.messages)
         lease.limit_gpu_power(_resolve_gpu_power_limit(request, request.model))
 
         # Use the exact model selected by the pool, including fallback.
