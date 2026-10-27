@@ -694,11 +694,17 @@ private struct UpdatesSection: View {
                 .font(.omlxText(DesignTokens.FontSize.subheadline))
                 .foregroundStyle(theme.textSecondary)
         case .available(let upd):
-            Text(String(localized: "status.updates.available_secondary",
-                        defaultValue: "Ready to download · \(upd.sizeText ?? "—")",
-                        comment: "Secondary update status line when a new version is available; placeholder is the download size or em dash"))
-                .font(.omlxText(DesignTokens.FontSize.subheadline))
-                .foregroundStyle(theme.textSecondary)
+            if let error = updates.lastError {
+                Text(error)
+                    .font(.omlxText(DesignTokens.FontSize.subheadline))
+                    .foregroundStyle(theme.redDot)
+            } else {
+                Text(String(localized: "status.updates.available_secondary",
+                            defaultValue: "Ready to download · \(upd.sizeText ?? "—")",
+                            comment: "Secondary update status line when a new version is available; placeholder is the download size or em dash"))
+                    .font(.omlxText(DesignTokens.FontSize.subheadline))
+                    .foregroundStyle(theme.textSecondary)
+            }
         case .downloading(let pct):
             Text(String(localized: "status.updates.downloading_secondary",
                         defaultValue: "Downloading · \(pct)%",

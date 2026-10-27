@@ -81,7 +81,9 @@ struct AppView: View {
                 },
                 onConfirm: {
                     services.updates.confirmUpdate(update)
-                    presentedUpdate = nil
+                    if services.updates.confirmationUpdate == nil {
+                        presentedUpdate = nil
+                    }
                 }
             )
                 .environment(\.omlxTheme, theme)
@@ -256,6 +258,11 @@ private struct UpdateConfirmationSheet: View {
     private var footer: some View {
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 3) {
+                if let error = updates.lastError {
+                    Text(error)
+                        .font(.omlxText(DesignTokens.FontSize.subheadline))
+                        .foregroundStyle(theme.redDot)
+                }
                 Text(String(localized: "update.confirm.size",
                             defaultValue: "Download size: \(update.sizeText ?? "Unknown")",
                             comment: "Update confirmation download size line; placeholder is a formatted byte size or Unknown"))

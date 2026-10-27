@@ -204,8 +204,12 @@ final class UpdateController {
     }
 
     func confirmUpdate(_ info: AvailableUpdate) {
-        confirmationUpdate = nil
+        lastError = nil
         installAndRestart(matchingVersion: info.version)
+        // A failure before the download starts keeps the sheet up with the error.
+        if lastError == nil {
+            confirmationUpdate = nil
+        }
     }
 
     /// One-button "Install & Restart". When the state is `.available`, kick
@@ -276,6 +280,7 @@ final class UpdateController {
                 channel: channel
             )
             await MainActor.run {
+                self.lastError = nil
                 if let release = result {
                     let info = AvailableUpdate(
                         version: release.version,
@@ -333,6 +338,8 @@ final class UpdateController {
                 self.lastError = String(describing: err)
                 self.state = .available(info)
                 self.updater = nil
+                // The sheet closed when the user confirmed; reopen it with the error.
+                self.presentConfirmation(for: info, automatic: false)
             },
             onReady: { [weak self] in
                 guard let self else { return }
@@ -351,7 +358,7 @@ final class UpdateController {
         if automatic, deferredPromptVersion == info.version {
             return
         }
-        lastError = nil
+        // Keep the last install failure so the reopened sheet still shows it.
         confirmationUpdate = info
         presentUpdateConfirmation?()
     }
