@@ -1210,6 +1210,7 @@ class StrataEngine(BaseEngine):
     external_engine_id = "strata"
     # The child accepts OpenAI tool definitions on the chat body.
     supports_tool_calling = True
+    # Logprobs stay unsupported. The server rejects the field.
     # Strata holds its own memory. There is no oMLX scheduler to resize.
     _prefill_memory_guard_managed_externally = True
 
@@ -1553,7 +1554,11 @@ class StrataEngine(BaseEngine):
         stream: bool,
         tools: list[dict] | None = None,
     ) -> dict[str, Any]:
-        """The chat body Strata reads. Splash-only fields stay off it."""
+        """The chat body Strata reads.
+
+        Splash-only fields stay off it. ``logprobs`` stays off it too:
+        this engine does not support them.
+        """
         top_k_value = top_k
         if isinstance(top_k, int) and not isinstance(top_k, bool) and top_k > _MAX_TOP_K:
             top_k_value = _MAX_TOP_K

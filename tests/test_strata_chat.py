@@ -218,6 +218,8 @@ class TestChat:
             thinking_budget=128,
             repetition_context_size=64,
             tools=[{"type": "function", "function": {"name": "add"}}],
+            logprobs=True,
+            top_logprobs=5,
             xtc_probability=0.5,
             xtc_threshold=0.1,
             specprefill=True,
@@ -245,6 +247,8 @@ class TestChat:
         assert body["penalty_last_n"] == 64
         assert body["tools"] == [{"type": "function", "function": {"name": "add"}}]
         for key in (
+            "logprobs",
+            "top_logprobs",
             "xtc_probability",
             "xtc_threshold",
             "specprefill",
@@ -253,6 +257,7 @@ class TestChat:
             "thinking_token_budget",
         ):
             assert key not in body
+        assert engine.supports_logprobs is False
         assert output.finished
         assert output.text == "<think>2+2</think>four"
         assert output.new_text == output.text
@@ -661,6 +666,63 @@ class TestErrors:
         assert response.status_code == 409, response.text
         assert response.json()["error"]["message"] == "a request is running"
         assert "Internal server error" not in response.text
+
+    def test_logprobs_are_rejected_before_the_child(self, tmp_path, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        import omlx.server as srv
+
+        seen: list[str] = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                seen.append(self.path)
+                length = int(self.headers.get("Content-Length") or 0)
+                self.rfile.read(length)
+                body = json.dumps({"input_tokens": 1}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_args):
+                return
+
+        with _Server(Handler) as server:
+            engine = _engine(tmp_path, server.url)
+            pool = MagicMock()
+            pool.preload_pinned_models = AsyncMock()
+            pool.check_ttl_expirations = AsyncMock()
+            pool.shutdown = AsyncMock()
+            pool.get_entry.return_value = None
+            monkeypatch.setattr(srv._server_state, "engine_pool", pool)
+            monkeypatch.setattr(
+                srv, "get_engine_for_model", AsyncMock(return_value=engine)
+            )
+            monkeypatch.setattr(srv, "resolve_model_id", lambda name: name)
+            monkeypatch.setattr(srv, "get_model_settings_for_request", lambda name: None)
+            monkeypatch.setitem(
+                srv.app.dependency_overrides,
+                srv.verify_inference_api_key,
+                lambda: True,
+            )
+            with TestClient(srv.app, raise_server_exceptions=False) as client:
+                response = client.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "flash",
+                        "stream": False,
+                        "logprobs": True,
+                        "messages": [{"role": "user", "content": "hi"}],
+                    },
+                )
+
+        assert response.status_code == 400, response.text
+        assert response.json()["error"]["message"] == (
+            "logprobs is not supported for this model."
+        )
+        assert seen == []
 
 
 def _json_response(handler: BaseHTTPRequestHandler, payload: dict) -> None:
