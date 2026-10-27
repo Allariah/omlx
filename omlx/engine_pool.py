@@ -74,7 +74,6 @@ from .exceptions import (
 from .model_discovery import (
     VLM_NATIVE_TEXT_MODEL_TYPES,
     detect_model_type,
-    discover_models,
     format_size,
     is_realtime_stt_model,
 )
@@ -1549,10 +1548,7 @@ class EnginePool:
         self._model_dirs = dirs
 
         gguf_root = _gguf_model_root()
-        if len(dirs) == 1:
-            discovered = discover_models(dirs[0], gguf_root)
-        else:
-            discovered = discover_models_from_dirs(dirs, gguf_root)
+        discovered = discover_models_from_dirs(dirs, gguf_root)
 
         pinned_set = set(pinned_models or [])
 
@@ -2390,6 +2386,45 @@ class EnginePool:
             get_global_settings().integrations.strata_path,
         )
 
+    def _selected_splash_target(
+        self,
+        entry: EngineEntry,
+        model_settings: object | None,
+        effective_type: str,
+    ) -> SplashTarget | None:
+        """The Splash target the model's settings select, else None.
+
+        Strata, and a model with no external engine, are not Splash failures:
+        this returns None so admission keeps their own size. A Splash model
+        that cannot run fails here, before memory admission, instead of
+        falling back to MLX.
+        """
+        engine_id = self.external_engine_id(entry.model_id, model_settings)
+        if not engine_id:
+            return None
+        if engine_id not in EXTERNAL_ENGINES:
+            raise ModelLoadingError(
+                entry.model_id, f"Unknown external engine '{engine_id}'"
+            )
+        if engine_id != "splash":
+            return None
+        if effective_type not in ("batched", "vlm"):
+            raise ModelLoadingError(
+                entry.model_id, "Splash serves language models only"
+            )
+        target, reason = self.splash_target(entry.model_id, model_settings)
+        if target is None:
+            raise ModelLoadingError(
+                entry.model_id,
+                self._with_other_gguf_refusals(
+                    entry,
+                    model_settings,
+                    "splash",
+                    f"Splash cannot serve '{entry.model_id}': {reason}",
+                ),
+            )
+        return target
+
     def _external_engine_for(
         self,
         entry: EngineEntry,
@@ -3010,6 +3045,9 @@ class EnginePool:
             runtime_load_settings = (
                 load_settings if ngram_admission_override else runtime_settings
             )
+            # Without a Splash target the size below falls back to the files'
+            # in-process footprint, so report why Splash cannot serve first.
+            self._selected_splash_target(entry, load_settings, entry.engine_type)
             admission_size = self._entry_runtime_resident_size(
                 entry,
                 load_settings,

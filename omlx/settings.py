@@ -402,6 +402,11 @@ class CacheSettings:
     gdn_ssd_split_enabled: bool | None = None
     gdn_ssd_pending_max_size: str = "512MB"
     gdn_sidecar_state_dtype: str = "fp32"
+    # Runtime-only: the configured dir that GlobalSettings.ensure_directories()
+    # could not create, e.g. on a disconnected external drive.
+    unavailable_ssd_cache_dir: Path | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     def get_gdn_snapshot_storage(self) -> str:
         """Return the user-facing GDN storage policy."""
@@ -446,11 +451,26 @@ class CacheSettings:
             base_path: Base oMLX directory.
 
         Returns:
-            Resolved SSD cache directory path.
+            Resolved SSD cache directory path. This is the default dir while
+            the configured dir is unavailable.
         """
-        if self.ssd_cache_dir:
+        if self.ssd_cache_dir and not self.uses_ssd_cache_fallback():
             return Path(self.ssd_cache_dir).expanduser().resolve()
         return base_path / "cache"
+
+    def uses_ssd_cache_fallback(self) -> bool:
+        """Return whether the configured SSD cache dir is unavailable."""
+        return bool(self.ssd_cache_dir) and (
+            Path(self.ssd_cache_dir).expanduser().resolve()
+            == self.unavailable_ssd_cache_dir
+        )
+
+    def is_ssd_cache_auto_size(self) -> bool:
+        """Return whether the SSD cache limit follows free disk space."""
+        # A fixed limit chosen for the configured drive can fill the fallback disk.
+        return (
+            self.ssd_cache_max_size.lower() == "auto" or self.uses_ssd_cache_fallback()
+        )
 
     def get_ssd_cache_max_size_bytes(self, base_path: Path) -> int:
         """
@@ -462,7 +482,7 @@ class CacheSettings:
         Returns:
             Max SSD cache size in bytes (half of free space plus existing cache for "auto").
         """
-        if self.ssd_cache_max_size.lower() == "auto":
+        if self.is_ssd_cache_auto_size():
             cache_dir = self.get_ssd_cache_dir(base_path)
             return get_auto_ssd_cache_size(cache_dir)
         return parse_size(self.ssd_cache_max_size)
@@ -1618,7 +1638,6 @@ class GlobalSettings:
         # Required directories - fatal if creation fails
         required = [
             self.base_path,
-            self.cache.get_ssd_cache_dir(self.base_path),
             self.logging.get_log_dir(self.base_path),
         ]
 
@@ -1631,9 +1650,28 @@ class GlobalSettings:
                     logger.error(f"Failed to create directory {directory}: {e}")
                     raise
 
-        # Model directories - skip unavailable paths (e.g. disconnected external drive)
-        valid_dirs = []
-        for directory in self.model.get_model_dirs(self.base_path):
+        # SSD cache - use the default dir while the configured one is
+        # unavailable. The setting keeps the configured path, and the fallback
+        # lasts until restart so loaded engines and new ones share one dir.
+        cache_dir = self.cache.get_ssd_cache_dir(self.base_path)
+        fallback_dir = self.base_path / "cache"
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            if cache_dir == fallback_dir:
+                logger.error(f"Failed to create directory {cache_dir}: {e}")
+                raise
+            logger.warning(
+                f"SSD cache directory unavailable, using {fallback_dir}: "
+                f"{cache_dir} ({e})"
+            )
+            fallback_dir.mkdir(parents=True, exist_ok=True)
+            self.cache.unavailable_ssd_cache_dir = cache_dir
+
+        # Keep unavailable model dirs (e.g. disconnected external drive) in the
+        # settings so discovery finds them again after reconnection.
+        model_dirs = self.model.get_model_dirs(self.base_path)
+        for directory in model_dirs:
             if not directory.exists():
                 try:
                     directory.mkdir(parents=True, exist_ok=True)
@@ -1647,12 +1685,9 @@ class GlobalSettings:
             access_error = model_directory_access_error(directory)
             if access_error is not None:
                 logger.warning(f"Model directory unavailable, skipping: {access_error}")
-                continue
 
-            valid_dirs.append(str(directory))
-
-        # Update model_dirs to only include valid paths
-        self.model.model_dirs = valid_dirs
+        # Store resolved paths so they match what the admin API reports.
+        self.model.model_dirs = [str(d) for d in model_dirs]
         self.model.model_dir = None
 
     def validate(self) -> list[str]:
@@ -1958,7 +1993,7 @@ class GlobalSettings:
             paged_ssd_cache_max_size=self.cache.get_ssd_cache_max_size_bytes(
                 self.base_path
             ),
-            paged_ssd_cache_auto_size=self.cache.ssd_cache_max_size.lower() == "auto",
+            paged_ssd_cache_auto_size=self.cache.is_ssd_cache_auto_size(),
             hot_cache_max_size=self.cache.get_hot_cache_max_size_bytes(),
             hot_cache_write_through=self.cache.hot_cache_write_through,
             gdn_ssd_split_enabled=self.cache.get_gdn_ssd_split_enabled(),

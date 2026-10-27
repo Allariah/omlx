@@ -1660,6 +1660,40 @@ def test_recovery_candidate_payload_versus_quoted_marker(markers, text, is_paylo
     assert f.take_recovery_candidate()
 
 
+def test_recovery_candidate_unclosed_envelope_3153_is_payload():
+    """Issue #3153 sample is a truncated call payload, not quoted-marker prose.
+
+    Option 1 recovery is not attempted here: the sample has no closing tags
+    and uses bare query= rather than <parameter=query>.
+    """
+    sample = (
+        "I have comprehensive material. Let me do one final targeted check...\n"
+        "\n"
+        "<tool_call>\n"
+        "<function=websearch>\n"
+        'query="Flowable Work platform-api analytics process-instance query '
+        'endpoint frequency duration chart data REST" numResults=5'
+    )
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "websearch",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                },
+            },
+        }
+    ]
+    f = ToolCallStreamFilter(_make_tokenizer(), tools=tools)
+    visible = f.feed(sample) + f.finish()
+
+    assert "<tool_call>" not in visible
+    assert f.recovery_candidate_is_payload() is True
+    assert f.take_recovery_candidate().startswith("<tool_call>")
+
+
 def test_close_marker_fallback_rescans_the_recovered_tail():
     """Prose recovered after a close marker is re-filtered, not emitted raw."""
     f = ToolCallStreamFilter(_make_tokenizer())

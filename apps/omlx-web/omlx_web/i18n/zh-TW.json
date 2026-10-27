@@ -515,6 +515,7 @@
   "settings.integrations.splash.max_memory_hint": "Empty gives Splash enough for the model's full context window. A larger limit gives its prefix cache more room; on a smaller Mac Splash fits a shorter context to the memory left. oMLX counts the memory Splash plans against its own limit.",
   "settings.integrations.splash.ssd_cache": "SSD cache",
   "settings.integrations.splash.ssd_cache_hint": "Splash's own prefix cache in the oMLX SSD cache folder, kept across restarts. Empty uses the oMLX SSD cache size and 0 turns it off. Needs the oMLX SSD cache.",
+  "settings.integrations.splash.ssd_cache_warning": "Applies to each Splash model, and a model's cache stays after it unloads, so the total can grow to this size times the number of Splash models you use. Set a size when you use more than one.",
   "settings.integrations.splash.auto": "Auto",
   "settings.integrations.splash.invalid_size": "Enter a size in GB, or leave the field empty for automatic.",
   "settings.integrations.splash.ane_prefill": "Neural Engine prefill",

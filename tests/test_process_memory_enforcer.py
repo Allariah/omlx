@@ -645,6 +645,37 @@ class TestCurrentUsageTelemetry:
         ):
             assert enforcer._get_hard_limit_bytes() == 48 * 1024**3
 
+    @pytest.mark.asyncio
+    async def test_poll_loop_picks_up_runtime_metal_cap_raise(self, mock_engine_pool):
+        """A raised iogpu.wired_limit_mb reaches the scheduler without a restart."""
+        enforcer = _make_enforcer(mock_engine_pool)
+        enforcer._prefill_memory_guard = True
+        enforcer._effective_metal_cap_bytes = 8 * 1024**3
+        # _make_enforcer pins the breakdown, so expose the cached cap through it.
+        enforcer._get_ceiling_breakdown = lambda: {
+            "static": 0,
+            "dynamic": 0,
+            "metal_cap": enforcer._get_effective_metal_cap_bytes(),
+            "hard_limit": 10 * 1024**3,
+        }
+        scheduler = MagicMock(spec=[])
+        engine = MagicMock(spec=[])
+        engine.scheduler = scheduler
+        mock_engine_pool._entries = {"model-a": _make_entry("model-a", engine=engine)}
+
+        with patch.object(
+            pme, "get_effective_metal_cap_bytes", return_value=12 * 1024**3
+        ):
+            await enforcer._check_and_enforce()
+        assert scheduler._memory_metal_cap_bytes == 12 * 1024**3
+
+        with patch.object(
+            pme, "get_effective_metal_cap_bytes", return_value=16 * 1024**3
+        ) as reader:
+            await enforcer._check_and_enforce()
+        reader.assert_not_called()
+        assert scheduler._memory_metal_cap_bytes == 12 * 1024**3
+
 
 class TestDisabledWhenCeilingZero:
     """Tests for enforcement disabled when the ceiling is 0 (guard off)."""

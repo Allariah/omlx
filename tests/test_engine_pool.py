@@ -108,6 +108,12 @@ class TestEnginePoolInit:
         assert "model-a" in pool.get_model_ids()
         assert "model-b" in pool.get_model_ids()
 
+    def test_discover_models_missing_sole_dir(self, tmp_path):
+        """A sole unavailable model dir is skipped instead of failing startup."""
+        pool = _make_pool(ceiling=10 * 1024**3)
+        pool.discover_models(str(tmp_path / "missing"))
+        assert pool.model_count == 0
+
     def test_discover_models_with_pinned(self, small_mock_model_dir):
         """Test model discovery with pinned models."""
         pool = _make_pool(ceiling=10 * 1024**3)

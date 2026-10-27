@@ -515,6 +515,7 @@
   "settings.integrations.splash.max_memory_hint": "留空时，Splash 会获得足以容纳模型完整上下文窗口的内存。上限越大，前缀缓存的空间越多；在内存较小的 Mac 上，Splash 会按剩余内存缩短上下文。oMLX 会把 Splash 计划使用的内存计入自身的上限。",
   "settings.integrations.splash.ssd_cache": "SSD 缓存",
   "settings.integrations.splash.ssd_cache_hint": "Splash 自己的前缀缓存，存放在 oMLX 的 SSD 缓存目录中，重启后保留。留空则沿用 oMLX 的 SSD 缓存大小，填 0 则关闭。需要启用 oMLX 的 SSD 缓存。",
+  "settings.integrations.splash.ssd_cache_warning": "此大小按每个 Splash 模型分别计算，模型卸载后缓存仍会保留，因此总占用最多可达此大小乘以使用过的 Splash 模型数量。使用多个 Splash 模型时请设置一个大小。",
   "settings.integrations.splash.auto": "自动",
   "settings.integrations.splash.invalid_size": "请输入以 GB 为单位的大小，或留空以自动设置。",
   "settings.integrations.splash.ane_prefill": "ANE 预填充",

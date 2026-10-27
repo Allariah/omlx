@@ -515,6 +515,7 @@
   "settings.integrations.splash.max_memory_hint": "Prázdné pole dá Splashu dost paměti na plné kontextové okno modelu. Vyšší limit nechá víc místa jeho prefix cache; na menším Macu se do zbylé paměti vejde kratší kontext. oMLX paměť, kterou Splash plánuje, započítává i do svého vlastního limitu.",
   "settings.integrations.splash.ssd_cache": "SSD cache",
   "settings.integrations.splash.ssd_cache_hint": "Vlastní prefix cache enginu Splash ve složce SSD cache oMLX, která přežije i restarty. Prázdné pole použije velikost SSD cache oMLX, 0 ji vypne. Vyžaduje zapnutou SSD cache oMLX.",
+  "settings.integrations.splash.ssd_cache_warning": "Platí pro každý model Splash zvlášť a cache modelu zůstává i po jeho uvolnění, takže celkem může zabrat tuto velikost krát počet používaných modelů Splash. Pokud používáte více než jeden, nastavte velikost.",
   "settings.integrations.splash.auto": "Auto",
   "settings.integrations.splash.invalid_size": "Zadejte velikost v GB, nebo nechte pole prázdné pro automatickou volbu.",
   "settings.integrations.splash.ane_prefill": "Prefill na Neural Engine",

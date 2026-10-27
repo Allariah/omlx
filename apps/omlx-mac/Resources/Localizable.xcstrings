@@ -8483,6 +8483,18 @@
         }
       }
     },
+    "integrations.splash.ssd_cache.warning" : {
+      "comment" : "Warning under the Splash SSD cache size about its per-model limit",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Applies to each Splash model, and a model's cache stays after it unloads, so the total can grow to this size times the number of Splash models you use. Set a size when you use more than one."
+          }
+        }
+      }
+    },
     "integrations.splash.use_auto" : {
       "comment" : "Button that clears the Splash path so the server detects the launcher",
       "extractionState" : "manual",
@@ -28927,19 +28939,19 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Show release notes before downloading in the background"
+            "value" : "Show the release notes when an update is found"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Показывать примечания к выпуску перед фоновым скачиванием"
+            "value" : "Показывать примечания к выпуску, когда найдено обновление"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "在后台下载前显示版本说明"
+            "value" : "发现更新时显示版本说明"
           }
         }
       }
@@ -28988,6 +29000,54 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "准备下载 · %@"
+          }
+        }
+      }
+    },
+    "status.updates.background_download" : {
+      "comment" : "Row label for the toggle that downloads found updates in the background",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Download Automatically"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Скачивать автоматически"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "自动下载"
+          }
+        }
+      }
+    },
+    "status.updates.background_download.sub" : {
+      "comment" : "Sublabel for the background update download toggle",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Download in the background, then ask before installing"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Скачивать в фоне и спрашивать перед установкой"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在后台下载，安装前询问"
           }
         }
       }
@@ -34601,6 +34661,54 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "在 Ask AI 回答期间限制整台 Mac 的 GPU 功率以节省电量（2 到 1000 W）。如果模型也设置了限制，则采用较低的值。"
+          }
+        }
+      }
+    },
+    "update.confirm.downloaded" : {
+      "comment" : "Update confirmation footer line when the update is already downloaded",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Downloaded and ready to install"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Скачано и готово к установке"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已下载，可以安装"
+          }
+        }
+      }
+    },
+    "update.confirm.subtitle_ready" : {
+      "comment" : "Subtitle for the update confirmation sheet when the update is already downloaded",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The update is downloaded. Review the release notes before relaunching."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Обновление скачано. Просмотрите примечания к выпуску перед перезапуском."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "更新已下载。请在重启前查看更新说明。"
           }
         }
       }
