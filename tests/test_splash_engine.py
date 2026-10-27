@@ -1561,6 +1561,18 @@ class TestEnginePool:
         engine = pool._external_engine_for(entry, ModelSettings(), "vlm")
         assert isinstance(engine, SplashEngine)
 
+    async def test_gguf_over_the_ceiling_reports_why_splash_cannot_serve(
+        self, tmp_path, launchers, global_settings
+    ):
+        launchers("splash")
+        pool, entry = _pool(tmp_path, with_draft=False)
+        entry.model_format = "gguf"
+        entry.estimated_size = 55 * GIB
+        pool._get_final_ceiling = lambda: 32 * GIB
+
+        with pytest.raises(ModelLoadingError, match="DFlash2 draft"):
+            await pool.get_engine(entry.model_id)
+
     def test_options_follow_omlx_settings(self, tmp_path, launchers, global_settings):
         launchers("splash")
         pool, entry = _pool(tmp_path)

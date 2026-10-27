@@ -2279,13 +2279,13 @@ class EnginePool:
             return next(iter(EXTERNAL_ENGINES))
         return None
 
-    def _external_engine_for(
+    def _selected_splash_target(
         self,
         entry: EngineEntry,
         model_settings: object | None,
         effective_type: str,
-    ) -> SplashEngine | None:
-        """The external engine the model's settings select, else None.
+    ) -> SplashTarget | None:
+        """The Splash target the model's settings select, else None.
 
         A model that cannot run on its selected engine fails to load with the
         reason instead of falling back to MLX, since the user asked for it.
@@ -2306,6 +2306,18 @@ class EnginePool:
             raise ModelLoadingError(
                 entry.model_id, f"Splash cannot serve '{entry.model_id}': {reason}"
             )
+        return target
+
+    def _external_engine_for(
+        self,
+        entry: EngineEntry,
+        model_settings: object | None,
+        effective_type: str,
+    ) -> SplashEngine | None:
+        """The external engine the model's settings select, else None."""
+        target = self._selected_splash_target(entry, model_settings, effective_type)
+        if target is None:
+            return None
         logger.info(
             "Serving %s through %s %s (%s)",
             entry.model_id,
@@ -2839,6 +2851,9 @@ class EnginePool:
             runtime_load_settings = (
                 load_settings if ngram_admission_override else runtime_settings
             )
+            # Without a Splash target the size below falls back to the files'
+            # in-process footprint, so report why Splash cannot serve first.
+            self._selected_splash_target(entry, load_settings, entry.engine_type)
             admission_size = self._entry_runtime_resident_size(
                 entry,
                 load_settings,
