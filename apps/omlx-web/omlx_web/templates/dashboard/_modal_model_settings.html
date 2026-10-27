@@ -948,12 +948,16 @@
                                     <p class="text-xs text-neutral-500 mt-0.5"
                                        x-text="isGgufModel() ? window.t('modal.model_settings.external_engine_gguf') : window.t('modal.model_settings.external_engine_hint')"></p>
                                     <p x-show="externalEngineReason()" class="text-xs text-amber-700 mt-1 break-words whitespace-pre-line" x-text="externalEngineReason()"></p>
-                                    <button type="button" x-show="externalEngineDraftRepo()" x-cloak
-                                            @click="downloadEngineDraft()"
-                                            class="mt-2 px-3 py-1.5 text-xs font-medium text-neutral-700 bg-neutral-100 hover:bg-neutral-200 rounded-lg transition-all inline-flex items-center gap-1.5">
-                                        <i data-lucide="download" class="w-3 h-3"></i>
-                                        <span x-text="window.t('modal.model_settings.external_engine_get_draft').replace('{repo_id}', externalEngineDraftRepo())"></span>
-                                    </button>
+                                    <div class="mt-2 inline-flex items-center gap-2" x-show="externalEngineDraftRepo()" x-cloak>
+                                        <span class="badge bg-neutral-100 text-neutral-600 border-neutral-200"
+                                              x-text="externalEngineDraftEngine().label"></span>
+                                        <button type="button"
+                                                @click="downloadEngineDraft()"
+                                                class="px-3 py-1.5 text-xs font-medium text-neutral-700 bg-neutral-100 hover:bg-neutral-200 rounded-lg transition-all inline-flex items-center gap-1.5">
+                                            <i data-lucide="download" class="w-3 h-3"></i>
+                                            <span x-text="window.t('modal.model_settings.external_engine_get_draft').replace('{repo_id}', externalEngineDraftRepo())"></span>
+                                        </button>
+                                    </div>
                                 </div>
                                 <button type="button"
                                         @click="modelSettings.external_engine = modelSettings.external_engine ? '' : firstUsableExternalEngine()"

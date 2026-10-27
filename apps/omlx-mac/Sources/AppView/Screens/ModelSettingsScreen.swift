@@ -1567,10 +1567,16 @@ private struct ExternalEngineRow: View {
         return engines.filter { !$0.compatible && !($0.reason ?? "").isEmpty }
     }
 
-    private var draftRepo: String? {
+    private var draftEngine: ExternalEngineOption? {
         let engine = engines.first(where: { $0.id == vm.effectiveExternalEngine }) ?? engines.first
-        guard let engine, !engine.compatible else { return nil }
-        return engine.draftRepo
+        guard let engine, !engine.compatible, let repo = engine.draftRepo, !repo.isEmpty else {
+            return nil
+        }
+        return engine
+    }
+
+    private var draftRepo: String? {
+        draftEngine?.draftRepo
     }
 
     private func menuLabel(_ engine: ExternalEngineOption) -> String {
@@ -1608,7 +1614,11 @@ private struct ExternalEngineRow: View {
                               comment: "Row label for serving a model with an external engine"),
                 sublabel: sublabel) {
                 HStack(spacing: 7) {
-                    if let draftRepo {
+                    if let draftEngine, let draftRepo {
+                        StatusPill(status: .custom(
+                            color: theme.accent,
+                            label: draftEngine.label,
+                            fillBg: true))
                         Button(draftStarted
                                ? String(localized: "settings.advanced.external_engine.draft_started",
                                         defaultValue: "Downloading…",

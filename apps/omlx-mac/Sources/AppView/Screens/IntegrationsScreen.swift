@@ -42,6 +42,11 @@ private struct ExternalEnginesSection: View {
 
     @Environment(\.omlxTheme) private var theme
 
+    /// Same engine name the model library draws on a compatible-engine pill.
+    private var splashBadge: String {
+        vm.splash?.label ?? "Splash"
+    }
+
     var body: some View {
         SectionHeader(
             String(localized: "integrations.section.external_engines",
@@ -139,7 +144,8 @@ private struct ExternalEnginesSection: View {
                               comment: "Row label for the Splash KV cache format"),
                 sublabel: String(localized: "integrations.splash.kv_format.sub",
                                  defaultValue: "int8 holds about twice the context of bf16 in the same memory.",
-                                 comment: "Sublabel for the Splash KV cache format")) {
+                                 comment: "Sublabel for the Splash KV cache format"),
+                badge: splashBadge) {
                 Popup(selection: vm.bind($vm.splashKvFormat, save: {
                     Task { await vm.save(.splashKvFormat, client: client) }
                 }), width: .controlCompact, options: [("int8", "int8"), ("bf16", "bf16")])
@@ -150,7 +156,8 @@ private struct ExternalEnginesSection: View {
                               comment: "Row label for the Splash memory limit"),
                 sublabel: String(localized: "integrations.splash.max_memory.sub",
                                  defaultValue: "Empty gives Splash enough for the full context window; a larger limit gives its prefix cache more room.",
-                                 comment: "Sublabel for the Splash memory limit")) {
+                                 comment: "Sublabel for the Splash memory limit"),
+                badge: splashBadge) {
                 TextInput(text: $vm.splashMaxMemoryGb,
                           placeholder: String(localized: "integrations.splash.auto",
                                               defaultValue: "Auto",
@@ -164,7 +171,8 @@ private struct ExternalEnginesSection: View {
                               comment: "Row label for the Splash SSD cache size"),
                 sublabel: String(localized: "integrations.splash.ssd_cache.sub",
                                  defaultValue: "Splash's prefix cache in the oMLX SSD cache folder. Empty uses the oMLX SSD cache size; 0 turns it off.",
-                                 comment: "Sublabel for the Splash SSD cache size")) {
+                                 comment: "Sublabel for the Splash SSD cache size"),
+                badge: splashBadge) {
                 TextInput(text: $vm.splashSsdCacheGb,
                           placeholder: String(localized: "integrations.splash.auto",
                                               defaultValue: "Auto",
@@ -180,6 +188,7 @@ private struct ExternalEnginesSection: View {
                 sublabel: String(localized: "integrations.splash.ane_prefill.sub",
                                  defaultValue: "Let Splash run part of long prompts on the Neural Engine when that is faster.",
                                  comment: "Sublabel for Splash Neural Engine prefill"),
+                badge: splashBadge,
                 isLast: running.isEmpty) {
                 RowSwitch(isOn: vm.bind($vm.splashAnePrefill, save: {
                     Task { await vm.save(.splashAnePrefill, client: client) }

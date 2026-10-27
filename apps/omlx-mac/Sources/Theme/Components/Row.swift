@@ -8,6 +8,8 @@ import SwiftUI
 struct Row<Trailing: View>: View {
     let label: String?
     let sublabel: String?
+    /// Engine name, drawn with the same pill the model library uses for `engine.label`.
+    let badge: String?
     let isLast: Bool
     let trailing: Trailing
 
@@ -16,11 +18,13 @@ struct Row<Trailing: View>: View {
     init(
         label: String? = nil,
         sublabel: String? = nil,
+        badge: String? = nil,
         isLast: Bool = false,
         @ViewBuilder trailing: () -> Trailing
     ) {
         self.label = label
         self.sublabel = sublabel
+        self.badge = badge
         self.isLast = isLast
         self.trailing = trailing()
     }
@@ -29,9 +33,17 @@ struct Row<Trailing: View>: View {
         HStack(alignment: .center, spacing: 12) {
             if let label {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(label)
-                        .font(.omlxText(DesignTokens.FontSize.body, weight: .medium))
-                        .foregroundStyle(theme.text)
+                    HStack(spacing: 6) {
+                        Text(label)
+                            .font(.omlxText(DesignTokens.FontSize.body, weight: .medium))
+                            .foregroundStyle(theme.text)
+                        if let badge, !badge.isEmpty {
+                            StatusPill(status: .custom(
+                                color: theme.accent,
+                                label: badge,
+                                fillBg: true))
+                        }
+                    }
                     if let sublabel, !sublabel.isEmpty {
                         Text(sublabel)
                             .font(.omlxText(11.5))
@@ -82,6 +94,7 @@ extension Row where Trailing == EmptyView {
     init(label: String, sublabel: String? = nil, isLast: Bool = false) {
         self.label = label
         self.sublabel = sublabel
+        self.badge = nil
         self.isLast = isLast
         self.trailing = EmptyView()
     }

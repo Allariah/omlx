@@ -1382,7 +1382,11 @@
                                 </div>
                                 <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 px-4 sm:px-6 py-4">
                                     <div>
-                                        <label class="text-sm text-neutral-700">{{ t('settings.integrations.splash.kv_format') }}</label>
+                                        <div class="flex items-center gap-2">
+                                            <label class="text-sm text-neutral-700">{{ t('settings.integrations.splash.kv_format') }}</label>
+                                            <span class="badge bg-neutral-100 text-neutral-600 border-neutral-200"
+                                                  x-text="globalSettings.external_engines.splash.label || 'Splash'"></span>
+                                        </div>
                                         <p class="text-xs text-neutral-400 mt-0.5">{{ t('settings.integrations.splash.kv_format_hint') }}</p>
                                     </div>
                                     <select x-model="globalSettings.integrations.splash_kv_format"
@@ -1394,7 +1398,11 @@
                                 </div>
                                 <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 px-4 sm:px-6 py-4">
                                     <div>
-                                        <label class="text-sm text-neutral-700">{{ t('settings.integrations.splash.max_memory') }}</label>
+                                        <div class="flex items-center gap-2">
+                                            <label class="text-sm text-neutral-700">{{ t('settings.integrations.splash.max_memory') }}</label>
+                                            <span class="badge bg-neutral-100 text-neutral-600 border-neutral-200"
+                                                  x-text="globalSettings.external_engines.splash.label || 'Splash'"></span>
+                                        </div>
                                         <p class="text-xs text-neutral-400 mt-0.5">{{ t('settings.integrations.splash.max_memory_hint') }}</p>
                                     </div>
                                     <div class="flex items-center gap-2">
@@ -1408,7 +1416,11 @@
                                 </div>
                                 <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 px-4 sm:px-6 py-4">
                                     <div>
-                                        <label class="text-sm text-neutral-700">{{ t('settings.integrations.splash.ssd_cache') }}</label>
+                                        <div class="flex items-center gap-2">
+                                            <label class="text-sm text-neutral-700">{{ t('settings.integrations.splash.ssd_cache') }}</label>
+                                            <span class="badge bg-neutral-100 text-neutral-600 border-neutral-200"
+                                                  x-text="globalSettings.external_engines.splash.label || 'Splash'"></span>
+                                        </div>
                                         <p class="text-xs text-neutral-400 mt-0.5">{{ t('settings.integrations.splash.ssd_cache_hint') }}</p>
                                     </div>
                                     <div class="flex items-center gap-2">
@@ -1422,7 +1434,11 @@
                                 </div>
                                 <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 px-4 sm:px-6 py-4">
                                     <div>
-                                        <label class="text-sm text-neutral-700">{{ t('settings.integrations.splash.ane_prefill') }}</label>
+                                        <div class="flex items-center gap-2">
+                                            <label class="text-sm text-neutral-700">{{ t('settings.integrations.splash.ane_prefill') }}</label>
+                                            <span class="badge bg-neutral-100 text-neutral-600 border-neutral-200"
+                                                  x-text="globalSettings.external_engines.splash.label || 'Splash'"></span>
+                                        </div>
                                         <p class="text-xs text-neutral-400 mt-0.5">{{ t('settings.integrations.splash.ane_prefill_hint') }}</p>
                                     </div>
                                     <button type="button"

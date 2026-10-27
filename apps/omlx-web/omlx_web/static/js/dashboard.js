@@ -4457,10 +4457,15 @@
                 return this.firstUsableExternalEngine() || engines[0]?.id || '';
             },
 
-            externalEngineDraftRepo() {
+            externalEngineDraftEngine() {
                 const engines = this.modelSettings.external_engines || [];
                 const engine = engines.find(e => e.id === this.effectiveExternalEngine()) || engines[0];
-                return engine && !engine.compatible ? engine.draft_repo || '' : '';
+                if (!engine || engine.compatible || !engine.draft_repo) return null;
+                return engine;
+            },
+
+            externalEngineDraftRepo() {
+                return this.externalEngineDraftEngine()?.draft_repo || '';
             },
 
             async downloadEngineDraft() {

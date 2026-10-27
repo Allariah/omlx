@@ -746,6 +746,44 @@ class TestDispatch:
         assert "vm.canPickExternalEngine || isGGUF" in view
         assert r"\(engine.label): \(engine.reason" in view
 
+    def test_splash_only_controls_use_the_engine_badge(self):
+        """KV cache, memory, SSD cache, Neural Engine prefill, and the draft download wear the Splash badge."""
+        root = Path(__file__).resolve().parents[1]
+        settings = (
+            root / "apps/omlx-web/omlx_web/templates/dashboard/_settings.html"
+        ).read_text()
+        modal = (
+            root / "apps/omlx-web/omlx_web/templates/dashboard/_modal_model_settings.html"
+        ).read_text()
+        script = (root / "apps/omlx-web/omlx_web/static/js/dashboard.js").read_text()
+        integrations = (
+            root / "apps/omlx-mac/Sources/AppView/Screens/IntegrationsScreen.swift"
+        ).read_text()
+        model_settings = (
+            root / "apps/omlx-mac/Sources/AppView/Screens/ModelSettingsScreen.swift"
+        ).read_text()
+        badge = (
+            'class="badge bg-neutral-100 text-neutral-600 border-neutral-200"'
+        )
+        splash_rows = settings.split("settings.integrations.strata.binary", 1)[0]
+        for key in (
+            "settings.integrations.splash.kv_format",
+            "settings.integrations.splash.max_memory",
+            "settings.integrations.splash.ssd_cache",
+            "settings.integrations.splash.ane_prefill",
+        ):
+            row = splash_rows.split(key, 1)[1].split("</div>", 1)[0]
+            assert badge in row
+            assert "external_engines.splash.label" in row
+        draft = modal.split("externalEngineDraftRepo()", 1)[1].split(
+            "trust_remote_code", 1
+        )[0]
+        assert badge in draft
+        assert "externalEngineDraftEngine().label" in draft
+        assert "externalEngineDraftEngine()" in script
+        assert integrations.count("badge: splashBadge") == 4
+        assert "label: draftEngine.label" in model_settings
+
     def test_process_memory_counts_strata(self, tmp_path):
         pool, entry = _pool(tmp_path)
         profile = tmp_path / "profile.json"
