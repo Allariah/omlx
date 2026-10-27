@@ -1311,7 +1311,8 @@ class StrataEngine(BaseEngine):
 
         Strata cannot read available RAM, so it refuses session parking
         and leaves the conversation cache off. This argv does not turn
-        either of those on.
+        either of those on. Splash's KV format, SSD cache, and Neural
+        Engine prefill are not flags here.
         """
         return [
             str(self._target.binary.path),
@@ -1556,8 +1557,9 @@ class StrataEngine(BaseEngine):
     ) -> dict[str, Any]:
         """The chat body Strata reads.
 
-        Splash-only fields stay off it. ``logprobs`` stays off it too:
-        this engine does not support them.
+        Splash's KV format, SSD cache, and Neural Engine prefill stay
+        off it. ``logprobs`` stays off it too: this engine does not
+        support them.
         """
         top_k_value = top_k
         if isinstance(top_k, int) and not isinstance(top_k, bool) and top_k > _MAX_TOP_K:

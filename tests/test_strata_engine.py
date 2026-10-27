@@ -989,6 +989,22 @@ class TestLifecycle:
         assert flags == ["--profile", "--host", "--port", "--quiet"]
         assert engine.get_cache_stats() is None
 
+    def test_splash_kv_ssd_and_ane_stay_off_the_serve_command(self, tmp_path):
+        """Those settings belong to Splash. The profile file is not rewritten."""
+        model = tmp_path / "model"
+        model.mkdir()
+        profile = _plan_profile(
+            model,
+            ["--max-context", "524288"],
+            splash_kv_format="int8",
+            splash_ssd_cache_gb=32,
+            splash_ane_prefill=True,
+        )
+        command = _plan_engine(tmp_path, profile)._serve_command(9)
+        flags = [part for part in command if part.startswith("--")]
+        assert flags == ["--profile", "--host", "--port", "--quiet"]
+        assert profile.read_text().count("int8") == 1
+
     async def test_stop_reaps_an_out_of_group_engine(
         self, tmp_path, lifecycle, monkeypatch
     ):
