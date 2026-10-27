@@ -2273,6 +2273,26 @@ def _loaded_strata_context(entry: object) -> int | None:
     return planned
 
 
+def _unloaded_strata_context(
+    entry: object, model_settings: object | None
+) -> int | None:
+    """``--max-context`` from the run config while the child is not loaded.
+
+    The GGUF length for this pack is smaller than the window the profile
+    starts. A loaded child still wins. Splash keeps the GGUF length.
+    """
+    from .engine.strata import strata_advertised_context
+
+    engine_id = None
+    if model_settings is not None:
+        engine_id = getattr(model_settings, "external_engine", None)
+    return strata_advertised_context(
+        getattr(entry, "model_path", None),
+        model_format=getattr(entry, "model_format", None),
+        external_engine=engine_id,
+    )
+
+
 def _configured_max_context_window(model_id: str | None = None) -> int | None:
     """
     Get the configured max context window limit.
@@ -2286,9 +2306,10 @@ def _configured_max_context_window(model_id: str | None = None) -> int | None:
            ``sampling.max_context_window_policy`` is set, return
            ``min(native, policy)``; otherwise return ``native`` as-is.
            A loaded Strata engine reports its own window (``/health``
-           ``max_context``, else ``/v1/models`` ``meta.n_ctx``). That
-           count is the native length: the child may have been started
-           above the GGUF ``max_position_embeddings``.
+           ``max_context``, else ``/v1/models`` ``meta.n_ctx``). While
+           it is unloaded, the run config's ``--max-context`` is that
+           native length. The GGUF ``max_position_embeddings`` is
+           smaller than the window this profile starts.
         3. **Fallback default** from ``SamplingSettings.max_context_window``
            — only used when neither tier 1 nor tier 2 yields a value.
            Treated as a default, NOT capped by the policy; existing
@@ -2324,6 +2345,8 @@ def _configured_max_context_window(model_id: str | None = None) -> int | None:
         entry = pool.get_entry(model_id)
         if entry is not None:
             native = _loaded_strata_context(entry)
+            if native is None:
+                native = _unloaded_strata_context(entry, model_settings)
             if native is None:
                 native = entry.model_context_length
             if native is not None:

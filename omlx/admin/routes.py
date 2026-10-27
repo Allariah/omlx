@@ -59,6 +59,7 @@ from ..engine.strata import (
     STRATA_INSTALL_HINT,
     find_strata_binary,
     inspect_strata_binary,
+    strata_advertised_context,
 )
 from ..exceptions import ModelBusyError
 from ..model_discovery import (
@@ -2381,6 +2382,24 @@ def _model_dirs_for_display(global_settings: Any | None) -> list[Path]:
         return []
 
 
+def _listed_context_length(model_info: dict, settings: object | None) -> int | None:
+    """The context length the admin model list should show.
+
+    A Strata pack's run config starts a larger window than the GGUF
+    ``max_position_embeddings``. Show that window while the model is
+    unloaded. Other models keep the length discovery recorded.
+    """
+    discovered = model_info.get("model_context_length")
+    window = strata_advertised_context(
+        model_info.get("model_path"),
+        model_format=model_info.get("model_format"),
+        external_engine=(
+            getattr(settings, "external_engine", None) if settings is not None else None
+        ),
+    )
+    return discovered if window is None else window
+
+
 @router.get("/api/models")
 async def list_models(is_admin: bool = Depends(require_admin)):
     """
@@ -2571,7 +2590,7 @@ async def list_models(is_admin: bool = Depends(require_admin)):
             "config_model_type": model_info.get("config_model_type", ""),
             # Native context window from the model's config.json — used by
             # the context bench UI to hide targets the model cannot reach.
-            "model_context_length": model_info.get("model_context_length"),
+            "model_context_length": _listed_context_length(model_info, settings),
             "thinking_default": model_info.get("thinking_default"),
             "preserve_thinking_default": model_info.get("preserve_thinking_default"),
             "reasoning_efforts": model_info.get("reasoning_efforts"),

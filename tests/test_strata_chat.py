@@ -521,3 +521,106 @@ class TestContext:
             validate_context_window(400_000, "flash")
             with pytest.raises(HTTPException):
                 validate_context_window(524_289, "flash")
+
+    def _unloaded(self, tmp_path, *, engine_id, policy=None, override=None):
+        from omlx.server import get_max_context_window
+
+        model = tmp_path / "model"
+        model.mkdir()
+        (model / "strata-flash.json").write_text(
+            json.dumps(
+                {
+                    "exe": "component:strata-engine",
+                    "tokenizer": "tokenizer",
+                    "args": ["--max-context", "524288"],
+                }
+            )
+        )
+        entry = MagicMock()
+        entry.model_context_length = 262144
+        entry.model_format = "gguf"
+        entry.model_path = str(model)
+        entry.engine = None
+        pool = MagicMock()
+        pool.get_entry.return_value = entry
+        state = MagicMock()
+        state.engine_pool = pool
+        state.settings_manager = None
+        state.sampling.max_context_window = 32768
+        state.sampling.max_context_window_policy = policy
+        settings = MagicMock()
+        settings.external_engine = engine_id
+        settings.max_context_window = override
+        return get_max_context_window, state, settings, model
+
+    def test_an_unloaded_pack_advertises_the_profile_window(self, tmp_path):
+        """The GGUF card says 262144. The profile starts the child at 524288."""
+        from omlx.admin.routes import _listed_context_length
+
+        get_max_context_window, state, settings, model = self._unloaded(
+            tmp_path, engine_id=None
+        )
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr("omlx.server._server_state", state)
+            patch.setattr(
+                "omlx.server.get_model_settings_for_request", lambda _name: settings
+            )
+            patch.setattr("omlx.server.resolve_model_id", lambda name: name)
+            assert get_max_context_window("flash") == 524288
+
+        info = {
+            "model_path": str(model),
+            "model_format": "gguf",
+            "model_context_length": 262144,
+        }
+        assert _listed_context_length(info, settings) == 524288
+
+    def test_splash_keeps_the_gguf_length_while_unloaded(self, tmp_path):
+        from omlx.admin.routes import _listed_context_length
+
+        get_max_context_window, state, settings, model = self._unloaded(
+            tmp_path, engine_id="splash"
+        )
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr("omlx.server._server_state", state)
+            patch.setattr(
+                "omlx.server.get_model_settings_for_request", lambda _name: settings
+            )
+            patch.setattr("omlx.server.resolve_model_id", lambda name: name)
+            assert get_max_context_window("flash") == 262144
+
+        assert (
+            _listed_context_length(
+                {
+                    "model_path": str(model),
+                    "model_format": "gguf",
+                    "model_context_length": 262144,
+                },
+                settings,
+            )
+            == 262144
+        )
+
+    def test_a_per_model_override_still_wins(self, tmp_path):
+        get_max_context_window, state, settings, _model = self._unloaded(
+            tmp_path, engine_id="strata", override=8192
+        )
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr("omlx.server._server_state", state)
+            patch.setattr(
+                "omlx.server.get_model_settings_for_request", lambda _name: settings
+            )
+            patch.setattr("omlx.server.resolve_model_id", lambda name: name)
+            assert get_max_context_window("flash") == 8192
+
+    def test_policy_clamps_the_profile_window(self, tmp_path):
+        get_max_context_window, state, settings, _model = self._unloaded(
+            tmp_path, engine_id="strata", policy=128_000
+        )
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr("omlx.server._server_state", state)
+            patch.setattr(
+                "omlx.server.get_model_settings_for_request", lambda _name: settings
+            )
+            patch.setattr("omlx.server.resolve_model_id", lambda name: name)
+            assert get_max_context_window("flash") == 128_000
