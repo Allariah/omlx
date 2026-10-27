@@ -8,9 +8,11 @@ the Metal engine and do not post a completion at a live model.
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
+from fastapi import HTTPException
 
 from omlx.engine.strata import StrataBinary, StrataEngine, StrataTarget
 from omlx.exceptions import InvalidRequestError
@@ -317,3 +319,113 @@ class TestStream:
             final.completion_tokens,
             final.cached_tokens,
         ) == (7, 3, 4)
+
+
+def _error_response(status: int, message: str) -> httpx.Response:
+    return httpx.Response(status, json={"error": {"message": message}})
+
+
+class TestErrors:
+    async def test_a_child_400_is_an_invalid_request(self, tmp_path):
+        engine = _mock_engine(
+            tmp_path,
+            lambda request: _error_response(400, "bad top_p"),
+        )
+        with pytest.raises(InvalidRequestError, match="^bad top_p$"):
+            await engine.chat([{"role": "user", "content": "hi"}])
+
+    @pytest.mark.parametrize("status", [401, 409, 429, 502, 503])
+    async def test_a_child_status_stays_that_status(self, tmp_path, status):
+        message = f"strata {status}"
+        engine = _mock_engine(
+            tmp_path,
+            lambda request: _error_response(status, message),
+        )
+        with pytest.raises(HTTPException) as caught:
+            await engine.chat([{"role": "user", "content": "hi"}])
+        assert caught.value.status_code == status
+        assert caught.value.detail == message
+
+    async def test_an_open_stream_carries_the_child_message(self, tmp_path):
+        engine = _mock_engine(
+            tmp_path,
+            lambda request: _error_response(409, "model is busy"),
+        )
+        with pytest.raises(RuntimeError, match="^model is busy$"):
+            async for _item in engine.stream_chat([{"role": "user", "content": "hi"}]):
+                pass
+
+    async def test_a_mid_stream_error_event_carries_the_message(self, tmp_path):
+        def handler(request: httpx.Request) -> httpx.Response:
+            raw = (
+                _sse_line({"choices": [{"delta": {"content": "Hi"}}]})
+                + _sse_line({"error": {"message": "the engine stopped"}})
+                + "data: [DONE]\n\n"
+            )
+            return httpx.Response(200, content=raw.encode())
+
+        engine = _mock_engine(tmp_path, handler)
+        seen: list[str] = []
+        with pytest.raises(RuntimeError, match="^the engine stopped$"):
+            async for item in engine.stream_chat([{"role": "user", "content": "hi"}]):
+                seen.append(item.new_text)
+        assert seen == ["Hi"]
+
+    def test_the_route_keeps_a_child_409(self, tmp_path, monkeypatch):
+        """A Strata 409 stays 409. A RuntimeError would be Internal server error."""
+        from fastapi.testclient import TestClient
+
+        import omlx.server as srv
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                self.rfile.read(length)
+                path = self.path.split("?", 1)[0].rstrip("/")
+                if path.endswith("/count_tokens"):
+                    status, payload = 200, {"input_tokens": 4}
+                else:
+                    status, payload = 409, {
+                        "error": {"type": "model_busy", "message": "a request is running"}
+                    }
+                body = json.dumps(payload).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_args):
+                return
+
+        with _Server(Handler) as server:
+            engine = _engine(tmp_path, server.url)
+            pool = MagicMock()
+            pool.preload_pinned_models = AsyncMock()
+            pool.check_ttl_expirations = AsyncMock()
+            pool.shutdown = AsyncMock()
+            pool.get_entry.return_value = None
+            monkeypatch.setattr(srv._server_state, "engine_pool", pool)
+            monkeypatch.setattr(
+                srv, "get_engine_for_model", AsyncMock(return_value=engine)
+            )
+            monkeypatch.setattr(srv, "resolve_model_id", lambda name: name)
+            monkeypatch.setattr(srv, "get_model_settings_for_request", lambda name: None)
+            monkeypatch.setitem(
+                srv.app.dependency_overrides,
+                srv.verify_inference_api_key,
+                lambda: True,
+            )
+            with TestClient(srv.app, raise_server_exceptions=False) as client:
+                response = client.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "flash",
+                        "stream": False,
+                        "messages": [{"role": "user", "content": "hi"}],
+                    },
+                )
+
+        assert response.status_code == 409, response.text
+        assert response.json()["error"]["message"] == "a request is running"
+        assert "Internal server error" not in response.text

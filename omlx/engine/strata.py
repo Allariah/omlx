@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from fastapi import HTTPException
 
 from ..exceptions import InvalidRequestError
 from ..utils.proc_memory import get_phys_footprint, list_process_group_pids
@@ -896,6 +897,33 @@ def _chat_output(payload: dict[str, Any]) -> GenerationOutput:
     )
 
 
+def _stream_error_message(chunk: dict[str, Any]) -> str | None:
+    """The message on a mid-stream ``data: {"error": ...}`` event."""
+    error = chunk.get("error")
+    if not error:
+        return None
+    if isinstance(error, dict):
+        message = error.get("message")
+        if isinstance(message, str) and message:
+            return message
+    return str(error)
+
+
+def _raise_for_child(response: httpx.Response, *, stream: bool) -> None:
+    """Turn a non-200 child response into the error oMLX will show.
+
+    Before a response is committed, 400 is an invalid request and the
+    other statuses keep their code. On an open stream the exception's
+    text is the child's message, which the SSE error payload copies.
+    """
+    message = _strata_error_message(response)
+    if stream:
+        raise RuntimeError(message)
+    if response.status_code == 400:
+        raise InvalidRequestError(message)
+    raise HTTPException(status_code=response.status_code, detail=message)
+
+
 def _strata_error_message(response: httpx.Response) -> str:
     """``error.message`` from a Strata JSON body, or the response text."""
     try:
@@ -1236,7 +1264,7 @@ class StrataEngine(BaseEngine):
         except httpx.HTTPError as exc:
             raise RuntimeError(str(exc)) from exc
         if response.status_code != 200:
-            raise RuntimeError(f"Strata returned HTTP {response.status_code}")
+            _raise_for_child(response, stream=False)
         try:
             payload = response.json()
         except ValueError as exc:
@@ -1283,9 +1311,7 @@ class StrataEngine(BaseEngine):
             ) as response:
                 if response.status_code != 200:
                     await response.aread()
-                    raise RuntimeError(
-                        f"Strata returned HTTP {response.status_code}"
-                    )
+                    _raise_for_child(response, stream=True)
                 async for line in response.aiter_lines():
                     if not line.startswith("data:"):
                         continue
@@ -1298,6 +1324,9 @@ class StrataEngine(BaseEngine):
                         continue
                     if not isinstance(chunk, dict):
                         continue
+                    error = _stream_error_message(chunk)
+                    if error:
+                        raise RuntimeError(error)
                     usage = chunk.get("usage")
                     if isinstance(usage, dict):
                         state.usage = usage
