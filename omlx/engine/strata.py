@@ -6,9 +6,9 @@ module does not vendor it and does not translate its Metal kernels into MLX.
 ``start()`` launches ``strata serve`` on a loopback port for a prepared
 profile. Chat is forwarded to the child's ``/v1/chat/completions``.
 Plain completions still refuse. The pool counts the shards the child
-maps, plus the profile's VRAM reserve. It does not count a projector
-the profile left closed, and it does not add the decode window on top
-of the native shard.
+maps, the pack and MTP files it opens, and the profile's VRAM reserve.
+It does not count a projector while vision is off, and it does not add
+the decode window on top of the native shard.
 """
 
 from __future__ import annotations
@@ -880,15 +880,70 @@ def _file_size(path: Path) -> int | None:
         return None
 
 
+def _files_under(root: Path) -> list[Path]:
+    """Regular files under ``root``, following symlinks.
+
+    Only this directory is walked. A missing path contributes nothing.
+    """
+    files: list[Path] = []
+    seen_dirs: set[Path] = set()
+
+    def walk(directory: Path) -> None:
+        try:
+            key = directory.resolve()
+        except OSError:
+            return
+        if key in seen_dirs:
+            return
+        seen_dirs.add(key)
+        try:
+            children = list(directory.iterdir())
+        except OSError:
+            return
+        for child in children:
+            try:
+                if child.is_dir():
+                    walk(child)
+                elif child.is_file():
+                    files.append(child)
+            except OSError:
+                continue
+
+    try:
+        if root.is_dir():
+            walk(root)
+    except OSError:
+        return []
+    return files
+
+
+def _unique_file_size(path: Path, seen: set[Path]) -> int | None:
+    """Bytes to add for ``path``. Zero if ``seen`` has it. None if missing."""
+    try:
+        key = path.resolve()
+    except OSError:
+        return None
+    if key in seen:
+        return 0
+    size = _file_size(path)
+    if size is None:
+        return None
+    seen.add(key)
+    return size
+
+
 def _memory_plan(profile: Path, model_folder: Path) -> int:
     """Bytes the pool should hold for the child this profile starts.
 
-    ``--native`` and ``--ple-gguf`` are the shards the child maps. The
-    decode window is that native shard (the log's ``54.8 GB`` is shard 1
-    in decimal GB), so ``--max-context`` is not added again. An mmproj
-    the profile did not open is not charged. ``--vram-reserve-mib`` is
-    added once. Zero means the shards could not be read, and the pool
-    keeps its folder estimate.
+    ``--native`` and ``--ple-gguf`` are the shards the child maps.
+    ``--pack`` and ``--mtp`` are directories of weights it also opens.
+    A path is counted once, after following symlinks. The decode window
+    is the native shard (the log's ``54.8 GB`` is shard 1 in decimal
+    GB), so ``--max-context`` is not added again. While vision is off,
+    an mmproj is not charged. Tokenizer files under pack or MTP are
+    skipped. ``--vram-reserve-mib`` is added once. Zero means the native
+    or ple shard could not be read, and the pool keeps its folder
+    estimate. A missing pack or MTP directory does not do that.
     """
     data = _read_json(profile) or {}
     flags = _flag_values(data.get("args"))
@@ -897,33 +952,44 @@ def _memory_plan(profile: Path, model_folder: Path) -> int:
     if not native or not ple:
         return 0
     base = _config_base(data, profile)
+    vision = _vision_enabled(data)
     paths = [
         _resolve_config_path(native, base),
         _resolve_config_path(ple, base),
     ]
-    for text in flags.values():
-        candidate = _resolve_config_path(text, base)
-        if _is_mmproj(candidate):
-            paths.append(candidate)
-    if _vision_enabled(data):
+    if vision:
+        for text in flags.values():
+            candidate = _resolve_config_path(text, base)
+            if _is_mmproj(candidate):
+                paths.append(candidate)
         try:
             children = list(model_folder.iterdir())
         except OSError:
             children = []
         paths.extend(path for path in children if _is_mmproj(path))
+    extras: list[Path] = []
+    for flag in ("--pack", "--mtp"):
+        text = flags.get(flag)
+        if not text:
+            continue
+        root = _resolve_config_path(text, base)
+        for path in _files_under(root):
+            if "tokenizer" in path.name.lower():
+                continue
+            if _is_mmproj(path) and not vision:
+                continue
+            extras.append(path)
     total = 0
     seen: set[Path] = set()
     for path in paths:
-        try:
-            key = path.resolve()
-        except OSError:
-            return 0
-        if key in seen:
-            continue
-        seen.add(key)
-        size = _file_size(path)
+        size = _unique_file_size(path, seen)
         if size is None:
             return 0
+        total += size
+    for path in extras:
+        size = _unique_file_size(path, seen)
+        if size is None:
+            continue
         total += size
     if total <= 0:
         return 0
@@ -1301,7 +1367,10 @@ class StrataEngine(BaseEngine):
         )
 
     def reserved_bytes(self) -> int:
-        """Opened shards plus the VRAM reserve. Zero keeps the folder estimate."""
+        """Shards, pack, and MTP bytes plus the VRAM reserve.
+
+        Zero keeps the folder estimate.
+        """
         return _memory_plan(self._target.profile_path, self._path)
 
     def _group_pids(self) -> list[int]:

@@ -1308,7 +1308,7 @@ class TestMemoryPlan:
 
         assert _plan_engine(tmp_path, profile).reserved_bytes() == 60
 
-    def test_a_named_mmproj_is_charged_when_vision_is_off(self, tmp_path):
+    def test_a_named_mmproj_is_excluded_when_vision_is_off(self, tmp_path):
         model = tmp_path / "model"
         model.mkdir()
         native = model / "shard-1.gguf"
@@ -1330,7 +1330,140 @@ class TestMemoryPlan:
             ui_vision_enabled=False,
         )
 
+        assert _plan_engine(tmp_path, profile).reserved_bytes() == 30
+
+    def test_a_named_mmproj_is_charged_when_vision_is_on(self, tmp_path):
+        model = tmp_path / "model"
+        model.mkdir()
+        native = model / "shard-1.gguf"
+        ple = model / "shard-2.gguf"
+        projector = tmp_path / "mmproj-named.gguf"
+        native.write_bytes(b"n" * 10)
+        ple.write_bytes(b"p" * 20)
+        projector.write_bytes(b"m" * 7)
+        profile = _plan_profile(
+            model,
+            [
+                "--native",
+                native.name,
+                "--ple-gguf",
+                ple.name,
+                "--mmproj",
+                str(projector),
+            ],
+            ui_vision_enabled=True,
+        )
+
         assert _plan_engine(tmp_path, profile).reserved_bytes() == 37
+
+    def test_pack_and_mtp_files_are_counted(self, tmp_path):
+        """Pack and MTP weights are added. Tokenizer and a closed mmproj are not."""
+        model = tmp_path / "model"
+        model.mkdir()
+        native = model / "shard-1.gguf"
+        ple = model / "shard-2.gguf"
+        native.write_bytes(b"n" * 10)
+        ple.write_bytes(b"p" * 20)
+        (model / "secret.bin").write_bytes(b"s" * 500)
+        dense = model / "dense-real.bin"
+        dense.write_bytes(b"d" * 100)
+        pack = model / "pack"
+        pack.mkdir()
+        (pack / "dense.bin").symlink_to(dense)
+        (pack / "tokenizer.json").write_bytes(b"t" * 50)
+        (pack / "tokenizer.model").write_bytes(b"m" * 40)
+        nested = pack / "weights"
+        nested.mkdir()
+        (nested / "more.bin").write_bytes(b"w" * 15)
+        mtp = model / "mtp"
+        mtp.mkdir()
+        (mtp / "mtp-q2_0.gguf").write_bytes(b"q" * 30)
+        (mtp / "mmproj-inside.gguf").write_bytes(b"v" * 9)
+        profile = _plan_profile(
+            model,
+            [
+                "--native",
+                native.name,
+                "--ple-gguf",
+                ple.name,
+                "--max-context",
+                "524288",
+                "--pack",
+                "pack",
+                "--mtp",
+                str(mtp),
+            ],
+            ui_vision_enabled=False,
+        )
+
+        assert _plan_engine(tmp_path, profile).reserved_bytes() == 175
+
+    def test_vision_on_charges_an_mmproj_inside_the_pack(self, tmp_path):
+        model = tmp_path / "model"
+        model.mkdir()
+        native = model / "shard-1.gguf"
+        ple = model / "shard-2.gguf"
+        native.write_bytes(b"n" * 10)
+        ple.write_bytes(b"p" * 20)
+        pack = model / "pack"
+        pack.mkdir()
+        (pack / "dense.bin").write_bytes(b"d" * 5)
+        (pack / "mmproj-pack.gguf").write_bytes(b"m" * 8)
+        profile = _plan_profile(
+            model,
+            ["--native", native.name, "--ple-gguf", ple.name, "--pack", "pack"],
+            ui_vision_enabled=True,
+        )
+
+        assert _plan_engine(tmp_path, profile).reserved_bytes() == 43
+
+    def test_a_shard_reused_inside_pack_is_counted_once(self, tmp_path):
+        model = tmp_path / "model"
+        model.mkdir()
+        shard = model / "only.gguf"
+        ple = model / "ple.gguf"
+        shard.write_bytes(b"s" * 15)
+        ple.write_bytes(b"p" * 4)
+        pack = model / "pack"
+        pack.mkdir()
+        (pack / "alias.gguf").symlink_to(shard)
+        (pack / "extra.bin").write_bytes(b"e" * 3)
+        profile = _plan_profile(
+            model,
+            [
+                "--native",
+                shard.name,
+                "--ple-gguf",
+                ple.name,
+                "--pack",
+                "pack",
+            ],
+        )
+
+        assert _plan_engine(tmp_path, profile).reserved_bytes() == 22
+
+    def test_a_missing_pack_does_not_drop_the_shards(self, tmp_path):
+        model = tmp_path / "model"
+        model.mkdir()
+        native = model / "shard-1.gguf"
+        ple = model / "shard-2.gguf"
+        native.write_bytes(b"n" * 10)
+        ple.write_bytes(b"p" * 20)
+        profile = _plan_profile(
+            model,
+            [
+                "--native",
+                native.name,
+                "--ple-gguf",
+                ple.name,
+                "--pack",
+                "missing-pack",
+                "--mtp",
+                "missing-mtp",
+            ],
+        )
+
+        assert _plan_engine(tmp_path, profile).reserved_bytes() == 30
 
     def test_the_same_shard_is_counted_once(self, tmp_path):
         model = tmp_path / "model"
