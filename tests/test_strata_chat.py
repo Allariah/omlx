@@ -349,6 +349,65 @@ def _sse_line(payload: dict) -> str:
     return f"data: {json.dumps(payload)}\n\n"
 
 
+def _post_chat_route(
+    tmp_path,
+    monkeypatch,
+    payload: dict,
+    handler: type[BaseHTTPRequestHandler] | None = None,
+    seen: list[str] | None = None,
+):
+    """POST /v1/chat/completions at a Strata engine backed by ``handler``."""
+    from fastapi.testclient import TestClient
+
+    import omlx.server as srv
+
+    recorded = [] if seen is None else seen
+    if handler is None:
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                recorded.append(self.path)
+                length = int(self.headers.get("Content-Length") or 0)
+                self.rfile.read(length)
+                body = json.dumps({"input_tokens": 1}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_args: object) -> None:
+                return
+
+        handler = Handler
+
+    with _Server(handler) as server:
+        engine = _engine(tmp_path, server.url)
+        pool = MagicMock()
+        pool.preload_pinned_models = AsyncMock()
+        pool.check_ttl_expirations = AsyncMock()
+        pool.shutdown = AsyncMock()
+        pool.get_entry.return_value = None
+        monkeypatch.setattr(srv._server_state, "engine_pool", pool)
+        monkeypatch.setattr(
+            srv, "get_engine_for_model", AsyncMock(return_value=engine)
+        )
+        monkeypatch.setattr(srv, "resolve_model_id", lambda name: name)
+        monkeypatch.setattr(
+            srv, "get_model_settings_for_request", lambda name: None
+        )
+        monkeypatch.setitem(
+            srv.app.dependency_overrides,
+            srv.verify_inference_api_key,
+            lambda: True,
+        )
+        try:
+            with TestClient(srv.app, raise_server_exceptions=False) as client:
+                return client.post("/v1/chat/completions", json=payload)
+        finally:
+            srv.app.dependency_overrides.pop(srv.verify_inference_api_key, None)
+
+
 class TestImages:
     def _image_message(self) -> list[dict]:
         return [
@@ -401,54 +460,17 @@ class TestImages:
         assert output.text == "a dot"
 
     def test_the_route_rejects_an_image_before_the_child(self, tmp_path, monkeypatch):
-        from fastapi.testclient import TestClient
-
-        import omlx.server as srv
-
         seen: list[str] = []
-
-        class Handler(BaseHTTPRequestHandler):
-            def do_POST(self):
-                seen.append(self.path)
-                length = int(self.headers.get("Content-Length") or 0)
-                self.rfile.read(length)
-                body = json.dumps({"input_tokens": 1}).encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-
-            def log_message(self, *_args):
-                return
-
-        with _Server(Handler) as server:
-            engine = _engine(tmp_path, server.url)
-            pool = MagicMock()
-            pool.preload_pinned_models = AsyncMock()
-            pool.check_ttl_expirations = AsyncMock()
-            pool.shutdown = AsyncMock()
-            pool.get_entry.return_value = None
-            monkeypatch.setattr(srv._server_state, "engine_pool", pool)
-            monkeypatch.setattr(
-                srv, "get_engine_for_model", AsyncMock(return_value=engine)
-            )
-            monkeypatch.setattr(srv, "resolve_model_id", lambda name: name)
-            monkeypatch.setattr(srv, "get_model_settings_for_request", lambda name: None)
-            monkeypatch.setitem(
-                srv.app.dependency_overrides,
-                srv.verify_inference_api_key,
-                lambda: True,
-            )
-            with TestClient(srv.app, raise_server_exceptions=False) as client:
-                response = client.post(
-                    "/v1/chat/completions",
-                    json={
-                        "model": "flash",
-                        "stream": False,
-                        "messages": self._image_message(),
-                    },
-                )
+        response = _post_chat_route(
+            tmp_path,
+            monkeypatch,
+            {
+                "model": "flash",
+                "stream": False,
+                "messages": self._image_message(),
+            },
+            seen=seen,
+        )
 
         assert response.status_code == 400, response.text
         assert "vision is off" in response.json()["error"]["message"]
@@ -649,9 +671,6 @@ class TestErrors:
 
     def test_the_route_keeps_a_child_409(self, tmp_path, monkeypatch):
         """A Strata 409 stays 409. A RuntimeError would be Internal server error."""
-        from fastapi.testclient import TestClient
-
-        import omlx.server as srv
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
@@ -662,7 +681,10 @@ class TestErrors:
                     status, payload = 200, {"input_tokens": 4}
                 else:
                     status, payload = 409, {
-                        "error": {"type": "model_busy", "message": "a request is running"}
+                        "error": {
+                            "type": "model_busy",
+                            "message": "a request is running",
+                        }
                     }
                 body = json.dumps(payload).encode()
                 self.send_response(status)
@@ -674,88 +696,34 @@ class TestErrors:
             def log_message(self, *_args):
                 return
 
-        with _Server(Handler) as server:
-            engine = _engine(tmp_path, server.url)
-            pool = MagicMock()
-            pool.preload_pinned_models = AsyncMock()
-            pool.check_ttl_expirations = AsyncMock()
-            pool.shutdown = AsyncMock()
-            pool.get_entry.return_value = None
-            monkeypatch.setattr(srv._server_state, "engine_pool", pool)
-            monkeypatch.setattr(
-                srv, "get_engine_for_model", AsyncMock(return_value=engine)
-            )
-            monkeypatch.setattr(srv, "resolve_model_id", lambda name: name)
-            monkeypatch.setattr(srv, "get_model_settings_for_request", lambda name: None)
-            monkeypatch.setitem(
-                srv.app.dependency_overrides,
-                srv.verify_inference_api_key,
-                lambda: True,
-            )
-            with TestClient(srv.app, raise_server_exceptions=False) as client:
-                response = client.post(
-                    "/v1/chat/completions",
-                    json={
-                        "model": "flash",
-                        "stream": False,
-                        "messages": [{"role": "user", "content": "hi"}],
-                    },
-                )
+        response = _post_chat_route(
+            tmp_path,
+            monkeypatch,
+            {
+                "model": "flash",
+                "stream": False,
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+            handler=Handler,
+        )
 
         assert response.status_code == 409, response.text
         assert response.json()["error"]["message"] == "a request is running"
         assert "Internal server error" not in response.text
 
     def test_logprobs_are_rejected_before_the_child(self, tmp_path, monkeypatch):
-        from fastapi.testclient import TestClient
-
-        import omlx.server as srv
-
         seen: list[str] = []
-
-        class Handler(BaseHTTPRequestHandler):
-            def do_POST(self):
-                seen.append(self.path)
-                length = int(self.headers.get("Content-Length") or 0)
-                self.rfile.read(length)
-                body = json.dumps({"input_tokens": 1}).encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-
-            def log_message(self, *_args):
-                return
-
-        with _Server(Handler) as server:
-            engine = _engine(tmp_path, server.url)
-            pool = MagicMock()
-            pool.preload_pinned_models = AsyncMock()
-            pool.check_ttl_expirations = AsyncMock()
-            pool.shutdown = AsyncMock()
-            pool.get_entry.return_value = None
-            monkeypatch.setattr(srv._server_state, "engine_pool", pool)
-            monkeypatch.setattr(
-                srv, "get_engine_for_model", AsyncMock(return_value=engine)
-            )
-            monkeypatch.setattr(srv, "resolve_model_id", lambda name: name)
-            monkeypatch.setattr(srv, "get_model_settings_for_request", lambda name: None)
-            monkeypatch.setitem(
-                srv.app.dependency_overrides,
-                srv.verify_inference_api_key,
-                lambda: True,
-            )
-            with TestClient(srv.app, raise_server_exceptions=False) as client:
-                response = client.post(
-                    "/v1/chat/completions",
-                    json={
-                        "model": "flash",
-                        "stream": False,
-                        "logprobs": True,
-                        "messages": [{"role": "user", "content": "hi"}],
-                    },
-                )
+        response = _post_chat_route(
+            tmp_path,
+            monkeypatch,
+            {
+                "model": "flash",
+                "stream": False,
+                "logprobs": True,
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+            seen=seen,
+        )
 
         assert response.status_code == 400, response.text
         assert response.json()["error"]["message"] == (

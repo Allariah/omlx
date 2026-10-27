@@ -1023,10 +1023,10 @@ def profile_max_context(
 
 
 def strata_advertised_context(
-    model_path: object,
+    model_path: str | os.PathLike[str] | None,
     *,
-    model_format: object,
-    external_engine: object,
+    model_format: str | None,
+    external_engine: str | None,
     configured: str | None = None,
 ) -> int | None:
     """The profile window when Strata is the engine for this folder.
@@ -1036,8 +1036,11 @@ def strata_advertised_context(
     launcher path, so a pack whose ``strata-*.json`` lives at the install
     root can still be found.
     """
-    if external_engine not in (None, "", "strata"):
+    engine_id = StrataEngine.external_engine_id
+    if external_engine not in (None, "", engine_id):
         return None
+    # A MagicMock format is not the string "gguf", so generic context
+    # window tests skip this lookup.
     if external_engine in (None, "") and model_format != "gguf":
         return None
     if not isinstance(model_path, (str, os.PathLike)):
@@ -1169,16 +1172,8 @@ class _StrataStream:
         return piece, bool(piece)
 
     def tool_calls(self) -> list[dict[str, str]] | None:
-        calls = [
-            {
-                "id": slot["id"],
-                "name": slot["name"],
-                "arguments": slot["arguments"] or "{}",
-            }
-            for _, slot in sorted(self.calls.items())
-            if slot["name"] or slot["arguments"]
-        ]
-        return calls or None
+        ordered = [slot for _, slot in sorted(self.calls.items())]
+        return _parser_tool_calls(ordered)
 
     def finish(self) -> GenerationOutput:
         closing = "</think>" if self.in_think else ""
