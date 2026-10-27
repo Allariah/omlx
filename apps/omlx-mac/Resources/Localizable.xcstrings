@@ -8483,6 +8483,18 @@
         }
       }
     },
+    "integrations.splash.ssd_cache.warning" : {
+      "comment" : "Warning under the Splash SSD cache size about its per-model limit",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Applies to each Splash model, and a model's cache stays after it unloads, so the total can grow to this size times the number of Splash models you use. Set a size when you use more than one."
+          }
+        }
+      }
+    },
     "integrations.splash.use_auto" : {
       "comment" : "Button that clears the Splash path so the server detects the launcher",
       "extractionState" : "manual",
