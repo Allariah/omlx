@@ -1423,7 +1423,7 @@
   "modal.model_settings.external_engine_gguf": "Modely GGUF běží jen na externím enginu.",
   "modal.model_settings.external_engine_get_draft": "Stáhnout {repo_id}",
   "modal.model_settings.external_engine_select": "Engine",
-  "modal.model_settings.external_engine_select_hint": "Splash: Metal engine od incoai se spekulativním dekódováním DFlash2. Nastavte jej v Nastavení → Integrace.",
+  "modal.model_settings.external_engine_select_hint": "Splash: Metal engine od incoai se spekulativním dekódováním DFlash2. Strata (https://github.com/Niko1221/Strata): pack ve složce modelu. Engine, který model neumí obsloužit, zůstane v seznamu a nejde vybrat. Nastavte je v Nastavení → Integrace.",
   "modal.model_settings.external_engine_section_note": "Tato nastavení se nepoužijí, dokud model obsluhuje externí engine.",
   "modal.model_settings.trust_remote_code": "Věřit přiloženému kódu",
   "modal.model_settings.trust_remote_code_hint": "Umožňuje repozitáři modelu při načtení spustit libovolný Python. Povolte jen pro důvěryhodné zdroje.",

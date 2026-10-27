@@ -1423,7 +1423,7 @@
   "modal.model_settings.external_engine_gguf": "Les modèles GGUF ne s'exécutent que sur un moteur externe.",
   "modal.model_settings.external_engine_get_draft": "Télécharger {repo_id}",
   "modal.model_settings.external_engine_select": "Engine",
-  "modal.model_settings.external_engine_select_hint": "Splash: incoai's Metal engine with DFlash2 speculative decoding. Set it up in Settings → Integrations.",
+  "modal.model_settings.external_engine_select_hint": "Splash: incoai's Metal engine with DFlash2 speculative decoding. Strata (https://github.com/Niko1221/Strata): a pack in the model folder. An engine that cannot serve this model stays listed and cannot be selected. Set them up in Settings → Integrations.",
   "modal.model_settings.external_engine_section_note": "These settings do not apply while an external engine serves this model.",
   "modal.model_settings.trust_remote_code": "Faire confiance au code distant",
   "modal.model_settings.trust_remote_code_hint": "Permet au dépôt du modèle d'exécuter du Python arbitraire au chargement. Activez uniquement pour les éditeurs de confiance.",

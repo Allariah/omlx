@@ -676,6 +676,76 @@ class TestDispatch:
         assert "canPickExternalEngine" in view
         assert 'id == "strata" && $0.compatible' in vm
 
+    async def test_a_plain_gguf_names_splash_and_strata_when_neither_can_serve(
+        self, tmp_path, monkeypatch, global_settings
+    ):
+        """The load refusal for a plain GGUF says why Splash and Strata each cannot serve it."""
+        monkeypatch.setattr("omlx.engine.splash._find_launcher", lambda name: None)
+        monkeypatch.setattr("omlx.engine.splash._is_m1_or_m2", lambda: False)
+        binary = _fake_launcher(tmp_path / "strata")
+        global_settings.integrations.strata_path = str(binary)
+        pool, entry = _pool(tmp_path)
+        entry.model_format = "gguf"
+        (Path(entry.model_path) / "weights.gguf").write_bytes(b"GGUF")
+
+        assert pool.external_engine_id(entry.model_id, ModelSettings()) == "splash"
+        with pytest.raises(ModelLoadingError) as caught:
+            pool._external_engine_for(entry, ModelSettings(), "batched")
+        message = str(caught.value)
+        assert "Splash cannot serve" in message
+        assert "Splash is not installed" in message
+        assert "Strata cannot serve" in message
+        assert "missing run config" in message
+
+        problem = await pool.external_engine_problem(entry.model_id, ModelSettings())
+        assert "Splash cannot serve" in problem
+        assert "Strata cannot serve" in problem
+        assert "missing run config" in problem
+
+        explicit = ModelSettings(external_engine="splash")
+        assert pool.external_engine_id(entry.model_id, explicit) == "splash"
+        with pytest.raises(ModelLoadingError) as splash_choice:
+            pool._external_engine_for(entry, explicit, "batched")
+        assert "Strata cannot serve" in str(splash_choice.value)
+        assert "missing run config" in str(splash_choice.value)
+
+        chosen = ModelSettings(external_engine="strata")
+        assert pool.external_engine_id(entry.model_id, chosen) == "strata"
+        with pytest.raises(ModelLoadingError) as strata_choice:
+            pool._external_engine_for(entry, chosen, "batched")
+        text = str(strata_choice.value)
+        assert "Strata cannot serve" in text
+        assert "Splash cannot serve" in text
+
+    def test_gguf_settings_show_strata_even_when_it_cannot_serve(self):
+        """The engine control lists Strata for a GGUF, with the reason it cannot be selected."""
+        root = Path(__file__).resolve().parents[1]
+        html = (
+            root / "apps/omlx-web/omlx_web/templates/dashboard/_modal_model_settings.html"
+        ).read_text()
+        script = (root / "apps/omlx-web/omlx_web/static/js/dashboard.js").read_text()
+        view = (
+            root
+            / "apps/omlx-mac/Sources/AppView/Screens/ModelSettingsScreen.swift"
+        ).read_text()
+        en = json.loads(
+            (root / "apps/omlx-web/omlx_web/i18n/en.json").read_text()
+        )
+        assert 'x-show="canPickExternalEngine() || isGgufModel()"' in html
+        select = html.split("external_engine_select", 1)[1].split("</select>", 1)[0]
+        assert "engine.reason" in select
+        reason = script.split("externalEngineReason()", 1)[1].split(
+            "saveSplashSize", 1
+        )[0]
+        assert "isGgufModel()" in reason
+        assert "!e.compatible" in reason
+        assert "e.label" in reason
+        hint = en["modal.model_settings.external_engine_select_hint"]
+        assert "Splash" in hint and "Strata" in hint
+        assert "https://github.com/Niko1221/Strata" in hint
+        assert "vm.canPickExternalEngine || isGGUF" in view
+        assert r"\(engine.label): \(engine.reason" in view
+
     def test_process_memory_counts_strata(self, tmp_path):
         pool, entry = _pool(tmp_path)
         profile = tmp_path / "profile.json"

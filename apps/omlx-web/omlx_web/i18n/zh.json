@@ -1423,7 +1423,7 @@
   "modal.model_settings.external_engine_gguf": "GGUF 模型只能在外部引擎上运行。",
   "modal.model_settings.external_engine_get_draft": "下载 {repo_id}",
   "modal.model_settings.external_engine_select": "引擎",
-  "modal.model_settings.external_engine_select_hint": "Splash：incoai 的 Metal 引擎，支持 DFlash2 推测解码。请在“设置 → 集成”中配置。",
+  "modal.model_settings.external_engine_select_hint": "Splash：incoai 的 Metal 引擎，支持 DFlash2 推测解码。Strata（https://github.com/Niko1221/Strata）：模型目录中的 pack。无法加载该模型的引擎仍会列出，且不能选择。请在“设置 → 集成”中配置。",
   "modal.model_settings.external_engine_section_note": "由外部引擎提供服务时，这些设置不生效。",
   "modal.model_settings.trust_remote_code": "信任远程代码",
   "modal.model_settings.trust_remote_code_hint": "允许模型仓库在加载时运行任意 Python 代码。请仅对可信的发布者启用。",

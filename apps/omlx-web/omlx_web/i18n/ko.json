@@ -1423,7 +1423,7 @@
   "modal.model_settings.external_engine_gguf": "GGUF 모델은 외부 엔진으로만 실행돼요.",
   "modal.model_settings.external_engine_get_draft": "{repo_id} 받기",
   "modal.model_settings.external_engine_select": "엔진",
-  "modal.model_settings.external_engine_select_hint": "Splash: incoai의 Metal 엔진으로 DFlash2 speculative decoding을 씁니다. 설정 → Integrations에서 설정합니다.",
+  "modal.model_settings.external_engine_select_hint": "Splash: incoai의 Metal 엔진으로 DFlash2 speculative decoding을 씁니다. Strata(https://github.com/Niko1221/Strata)는 모델 폴더의 pack을 사용합니다. 이 모델을 실행할 수 없는 엔진은 목록에 남고 선택할 수 없습니다. 설정 → Integrations에서 설정합니다.",
   "modal.model_settings.external_engine_section_note": "외부 엔진이 이 모델을 서빙하는 동안에는 이 설정이 적용되지 않습니다.",
   "modal.model_settings.trust_remote_code": "원격 코드 신뢰",
   "modal.model_settings.trust_remote_code_hint": "모델 저장소의 임의 Python 코드 실행을 허용합니다. 신뢰하는 게시자에만 사용하세요.",

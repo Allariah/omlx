@@ -4485,8 +4485,16 @@
                 }
             },
 
+            // A GGUF lists every engine that cannot serve it. The effective
+            // engine alone used to hide Strata behind Splash's sentence.
             externalEngineReason() {
                 const engines = this.modelSettings.external_engines || [];
+                if (this.isGgufModel()) {
+                    const blocked = engines.filter(e => !e.compatible && e.reason);
+                    if (blocked.length) {
+                        return blocked.map(e => e.label + ': ' + e.reason).join('\n');
+                    }
+                }
                 const selected = engines.find(e => e.id === this.effectiveExternalEngine());
                 if (selected) return selected.compatible ? '' : selected.reason;
                 return engines.some(e => e.compatible) ? '' : (engines[0]?.reason || '');

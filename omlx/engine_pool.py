@@ -2282,12 +2282,54 @@ class EnginePool:
         """Backward-compatible name for the external-launcher check."""
         await self._check_external_launcher(model_id, runtime_settings)
 
+    def _engine_refusal(
+        self, entry: EngineEntry, model_settings: object | None, engine_id: str
+    ) -> str:
+        """Why ``engine_id`` cannot serve ``entry``, or '' when it can."""
+        if engine_id == "strata":
+            target, reason = self.strata_target(entry.model_id, model_settings)
+        elif engine_id == "splash":
+            target, reason = self.splash_target(entry.model_id, model_settings)
+        else:
+            return f"Unknown external engine '{engine_id}'"
+        if target is not None:
+            return ""
+        label = EXTERNAL_ENGINES.get(engine_id, engine_id)
+        return f"{label} cannot serve '{entry.model_id}': {reason}"
+
+    def _with_other_gguf_refusals(
+        self,
+        entry: EngineEntry,
+        model_settings: object | None,
+        selected: str,
+        message: str,
+    ) -> str:
+        """Add every other external engine that also cannot serve a GGUF.
+
+        A plain GGUF stays on Splash, and that refusal used to be the only
+        sentence the load error showed. Strata's own reason stays visible
+        beside it. An engine that can serve the folder is left out.
+        """
+        if not message or entry.model_format != "gguf":
+            return message
+        extras: list[str] = []
+        for engine_id in EXTERNAL_ENGINES:
+            if engine_id == selected:
+                continue
+            refusal = self._engine_refusal(entry, model_settings, engine_id)
+            if refusal:
+                extras.append(refusal)
+        if not extras:
+            return message
+        return message + "\n" + "\n".join(extras)
+
     async def external_engine_problem(
         self, model_id: str, model_settings: object | None
     ) -> str:
         """Why the selected external engine cannot serve ``model_id``.
 
         Empty when none is selected, or when the selected one can serve it.
+        A GGUF also names every other external engine that cannot serve it.
         """
         engine_id = self.external_engine_id(model_id, model_settings)
         if not engine_id:
@@ -2295,11 +2337,15 @@ class EnginePool:
         if engine_id not in EXTERNAL_ENGINES:
             return f"Unknown external engine '{engine_id}'"
         await self._check_external_launcher(model_id, model_settings)
-        if engine_id == "strata":
-            _, reason = self.strata_target(model_id, model_settings)
-            return reason
-        _, reason = self.splash_target(model_id, model_settings)
-        return reason
+        entry = self._entries.get(model_id)
+        if entry is None:
+            return f"Model '{model_id}' not found"
+        return self._with_other_gguf_refusals(
+            entry,
+            model_settings,
+            engine_id,
+            self._engine_refusal(entry, model_settings, engine_id),
+        )
 
     def external_engine_id(
         self, model_id: str, model_settings: object | None
@@ -2378,7 +2424,12 @@ class EnginePool:
         if target is None:
             raise ModelLoadingError(
                 entry.model_id,
-                f"Strata cannot serve '{entry.model_id}': {reason}",
+                self._with_other_gguf_refusals(
+                    entry,
+                    model_settings,
+                    "strata",
+                    f"Strata cannot serve '{entry.model_id}': {reason}",
+                ),
             )
         logger.info(
             "Serving %s through Strata %s (%s)",
@@ -2400,7 +2451,13 @@ class EnginePool:
         target, reason = self.splash_target(entry.model_id, model_settings)
         if target is None:
             raise ModelLoadingError(
-                entry.model_id, f"Splash cannot serve '{entry.model_id}': {reason}"
+                entry.model_id,
+                self._with_other_gguf_refusals(
+                    entry,
+                    model_settings,
+                    "splash",
+                    f"Splash cannot serve '{entry.model_id}': {reason}",
+                ),
             )
         logger.info(
             "Serving %s through %s %s (%s)",

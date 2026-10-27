@@ -1533,8 +1533,8 @@ private struct MemorySavingSection: View {
     }
 }
 
-/// "Use External Engine" toggle plus the engine to use. Engines that cannot
-/// serve the model stay out of the menu; the first that can is the default.
+/// "Use External Engine" toggle plus the engine to use. A GGUF lists every
+/// engine. One that cannot serve the folder stays visible and cannot be selected.
 private struct ExternalEngineRow: View {
     @Bindable var vm: ModelSettingsScreenVM
     let client: OMLXClient
@@ -1542,6 +1542,7 @@ private struct ExternalEngineRow: View {
     @State private var draftStarted = false
     /// Why the last draft download did not start; the button retries.
     @State private var draftError: String?
+    @Environment(\.omlxTheme) private var theme
 
     private var usableEngine: String? {
         engines.first(where: { $0.compatible })?.id
@@ -1549,14 +1550,45 @@ private struct ExternalEngineRow: View {
 
     private var isGGUF: Bool { vm.model?.isGGUF == true }
 
+    /// A GGUF shows Splash and Strata together. Other models keep the menu
+    /// to engines that can run, plus one the settings already name.
+    private var menuEngines: [ExternalEngineOption] {
+        if isGGUF { return engines }
+        return engines.filter {
+            $0.compatible
+                || $0.id == vm.externalEngine
+                || $0.id == vm.effectiveExternalEngine
+        }
+    }
+
+    /// Engines a GGUF lists but cannot select, each with its own reason.
+    private var blockedEngines: [ExternalEngineOption] {
+        guard isGGUF else { return [] }
+        return engines.filter { !$0.compatible && !($0.reason ?? "").isEmpty }
+    }
+
     private var draftRepo: String? {
         let engine = engines.first(where: { $0.id == vm.effectiveExternalEngine }) ?? engines.first
         guard let engine, !engine.compatible else { return nil }
         return engine.draftRepo
     }
 
+    private func menuLabel(_ engine: ExternalEngineOption) -> String {
+        guard !engine.compatible, !(engine.reason ?? "").isEmpty else {
+            return engine.label
+        }
+        return String(localized: "settings.advanced.external_engine.unavailable",
+                      defaultValue: "\(engine.label) — unavailable",
+                      comment: "Menu label for an external engine that cannot serve this model; placeholder is the engine name")
+    }
+
     private var sublabel: String {
         if let draftError { return draftError }
+        if isGGUF {
+            return String(localized: "settings.advanced.external_engine.gguf",
+                          defaultValue: "GGUF models run on an external engine only.",
+                          comment: "Sublabel for the external engine toggle of a GGUF model")
+        }
         let selected = engines.first(where: { $0.id == vm.effectiveExternalEngine })
         if let selected, !selected.compatible, let reason = selected.reason, !reason.isEmpty {
             return reason
@@ -1564,65 +1596,76 @@ private struct ExternalEngineRow: View {
         if usableEngine == nil, let reason = engines.first?.reason, !reason.isEmpty {
             return reason
         }
-        if isGGUF {
-            return String(localized: "settings.advanced.external_engine.gguf",
-                          defaultValue: "GGUF models run on an external engine only.",
-                          comment: "Sublabel for the external engine toggle of a GGUF model")
-        }
         return String(localized: "settings.advanced.external_engine.sub",
                       defaultValue: "Serve this model with another inference engine in its own process instead of oMLX's MLX engines.",
                       comment: "Sublabel for the external engine toggle")
     }
 
     var body: some View {
-        Row(label: String(localized: "settings.advanced.external_engine.label",
-                          defaultValue: "Use External Engine",
-                          comment: "Row label for serving a model with an external engine"),
-            sublabel: sublabel) {
-            HStack(spacing: 7) {
-                if let draftRepo {
-                    Button(draftStarted
-                           ? String(localized: "settings.advanced.external_engine.draft_started",
-                                    defaultValue: "Downloading…",
-                                    comment: "Draft download button label after the download starts")
-                           : String(localized: "settings.advanced.external_engine.get_draft",
-                                    defaultValue: "Download \(draftRepo)",
-                                    comment: "Button that downloads the draft model an external engine needs; placeholder is the Hugging Face repo")) {
-                        Task { await downloadDraft(draftRepo) }
+        VStack(alignment: .leading, spacing: 0) {
+            Row(label: String(localized: "settings.advanced.external_engine.label",
+                              defaultValue: "Use External Engine",
+                              comment: "Row label for serving a model with an external engine"),
+                sublabel: sublabel) {
+                HStack(spacing: 7) {
+                    if let draftRepo {
+                        Button(draftStarted
+                               ? String(localized: "settings.advanced.external_engine.draft_started",
+                                        defaultValue: "Downloading…",
+                                        comment: "Draft download button label after the download starts")
+                               : String(localized: "settings.advanced.external_engine.get_draft",
+                                        defaultValue: "Download \(draftRepo)",
+                                        comment: "Button that downloads the draft model an external engine needs; placeholder is the Hugging Face repo")) {
+                            Task { await downloadDraft(draftRepo) }
+                        }
+                        .buttonStyle(.omlx(.normal, size: .small))
+                        .disabled(draftStarted)
+                        .help(draftError ?? "")
                     }
-                    .buttonStyle(.omlx(.normal, size: .small))
-                    .disabled(draftStarted)
-                    .help(draftError ?? "")
-                }
-                if vm.canPickExternalEngine {
-                    Popup(selection: Binding(
-                        get: {
-                            vm.externalEngine.isEmpty
-                                ? vm.effectiveExternalEngine
-                                : vm.externalEngine
-                        },
-                        set: { newValue in
-                            vm.externalEngine = newValue
+                    if vm.canPickExternalEngine || isGGUF {
+                        Popup(selection: Binding(
+                            get: {
+                                vm.externalEngine.isEmpty
+                                    ? vm.effectiveExternalEngine
+                                    : vm.externalEngine
+                            },
+                            set: { newValue in
+                                // A GGUF shows an engine that cannot serve the folder,
+                                // and choosing it must not replace the saved engine.
+                                if isGGUF && engines.contains(where: {
+                                    $0.id == newValue && !$0.compatible
+                                }) {
+                                    return
+                                }
+                                vm.externalEngine = newValue
+                                save()
+                            }
+                        ),
+                              width: .controlCompact,
+                              options: menuEngines.map { ($0.id, menuLabel($0)) })
+                    }
+                    RowSwitch(isOn: Binding(
+                        get: { !vm.effectiveExternalEngine.isEmpty },
+                        set: { on in
+                            vm.externalEngine = on ? (usableEngine ?? "") : ""
                             save()
                         }
-                    ),
-                          width: .controlCompact,
-                          options: engines
-                              .filter {
-                                  $0.compatible
-                                      || $0.id == vm.externalEngine
-                                      || $0.id == vm.effectiveExternalEngine
-                              }
-                              .map { ($0.id, $0.label) })
+                    ))
+                    .disabled(isGGUF || (vm.externalEngine.isEmpty && usableEngine == nil))
                 }
-                RowSwitch(isOn: Binding(
-                    get: { !vm.effectiveExternalEngine.isEmpty },
-                    set: { on in
-                        vm.externalEngine = on ? (usableEngine ?? "") : ""
-                        save()
+            }
+            if !blockedEngines.isEmpty {
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(blockedEngines) { engine in
+                        Text("\(engine.label): \(engine.reason ?? "")")
+                            .font(.omlxText(11.5))
+                            .foregroundStyle(theme.textSecondary)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
-                ))
-                .disabled(isGGUF || (vm.externalEngine.isEmpty && usableEngine == nil))
+                }
+                .padding(.horizontal, 14)
+                .padding(.bottom, 8)
             }
         }
     }
