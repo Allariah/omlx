@@ -212,7 +212,7 @@ Configure sampling parameters, chat template kwargs, TTL, model alias, model typ
 
 - **Model alias**: set a custom API-visible name. `/v1/models` returns the alias, and requests accept both the alias and directory name.
 - **Model type override**: manually set a model as LLM or VLM regardless of auto-detection.
-- **External engine**: serve Qwen3.8-27B and Qwen3.6-35B-A3B MLX, NVFP4 and GGUF checkpoints, plus Qwen3.8-Flash-Next GGUFs with Splash 1.4.0 or later, from your model directories with [Splash](https://github.com/incoai/splash)'s Metal engine in its own process (official build on M3 or later, Splash M1 on M1/M2). See [docs/Splash.md](docs/Splash.md).
+- **External engine**: serve the models [Splash](https://github.com/incoai/splash) supports, including GGUF files, from your model directories on Splash's Metal engine in its own process. See [docs/Splash.md](docs/Splash.md) for the supported models and Splash versions.
 - **Profiles**: save named bundles of per-model settings and switch between them from the admin panel. A profile can optionally be exposed as its own model: `/v1/models` then also lists `<model>:<profile>` (e.g. `qwen3-8b:thinking`), which serves on the same engine as the base model with the profile's settings overlaid per request — no extra memory, no reload. When the base model has an alias, the exposed ID is advertised as `<alias>:<profile>`; the directory-name form keeps working, just like for the base model.
 
 <p align="center">

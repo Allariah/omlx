@@ -77,6 +77,8 @@ Run `python -m pytest -q tests/test_modernbert_attention.py tests/test_embedding
 
 Run `python -m pytest -q tests/test_model_discovery.py tests/test_splash_engine.py tests/test_hf_downloader.py -k "gguf or Gguf or nvfp4 or FileSelection or splash_package"` for GGUF models, Splash's checkpoint checks and file-selection downloads. The `write_gguf` fixture in `tests/conftest.py` writes a GGUF header with given metadata, so discovery, the generated model folder and its derived tokenizer, Splash's checks, and per-file deletion run without a model download.
 
+Run `python -m pytest -q tests/test_splash_engine.py -k "122b or flint or pruned"` for the families Splash 1.4.1 adds and pruned MoE GGUFs.
+
 Run `python -m pytest -q tests/test_splash_engine.py -k TestDiskCache` and `node --test apps/omlx-web/tests/ssd_cache_clear_ui.test.cjs` for Splash SSD-cache deletion. These cover idle unload before deletion, busy requests, native file locks, symlink targets, sparse-file disk usage, and cache left by unloaded models. The lock file stays in place so another Splash process cannot bypass it while cache data is being removed.
 
 # Decision model tests
