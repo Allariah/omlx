@@ -4,8 +4,8 @@
 Strata (https://github.com/Niko1221/Strata) is a separate program. This
 module does not vendor it and does not translate its Metal kernels into MLX.
 ``start()`` launches ``strata serve`` on a loopback port for a prepared
-profile. Request translation and the memory contract are not part of this
-scaffold: chat and completions refuse, and the pool does not invent a
+profile. Chat is forwarded to the child's ``/v1/chat/completions``.
+Plain completions still refuse, and the pool does not invent a
 resident-byte budget.
 """
 
@@ -66,6 +66,8 @@ STRATA_INSTALL_HINT = (
 _REQUEST_UNAVAILABLE = (
     "Strata cannot serve this request yet: chat translation is not implemented"
 )
+_MAX_TOP_K = 64
+_MAX_STOP = 4
 
 
 @dataclass(frozen=True)
@@ -804,6 +806,52 @@ def _watchdog_command(command: list[str]) -> list[str]:
     return ["/bin/sh", "-c", script, "strata-watchdog", str(os.getpid()), *command]
 
 
+def _as_int(value: object, default: int = 0) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return default
+    return value
+
+
+def _fold_message(message: dict[str, Any]) -> str:
+    """Fold one assistant message the way Splash folds a streamed choice.
+
+    ``reasoning_content`` becomes a ``<think>`` span so oMLX's thinking
+    parser can split it back out. The span is closed when content follows
+    or the message ends inside it.
+    """
+    reasoning = message.get("reasoning_content") or ""
+    content = message.get("content") or ""
+    if not isinstance(reasoning, str):
+        reasoning = ""
+    if not isinstance(content, str):
+        content = ""
+    text = f"<think>{reasoning}" if reasoning else ""
+    if content:
+        text += ("</think>" if reasoning else "") + content
+    elif reasoning:
+        text += "</think>"
+    return text
+
+
+def _chat_output(payload: dict[str, Any]) -> GenerationOutput:
+    choices = payload.get("choices") or []
+    choice = choices[0] if choices and isinstance(choices[0], dict) else {}
+    message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+    usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+    details = usage.get("prompt_tokens_details")
+    cached = details.get("cached_tokens") if isinstance(details, dict) else 0
+    text = _fold_message(message)
+    return GenerationOutput(
+        text=text,
+        new_text=text,
+        finished=True,
+        finish_reason=choice.get("finish_reason") or "stop",
+        prompt_tokens=_as_int(usage.get("prompt_tokens")),
+        completion_tokens=_as_int(usage.get("completion_tokens")),
+        cached_tokens=_as_int(cached),
+    )
+
+
 def _strata_error_message(response: httpx.Response) -> str:
     """``error.message`` from a Strata JSON body, or the response text."""
     try:
@@ -1078,12 +1126,102 @@ class StrataEngine(BaseEngine):
         self._refuse_request()
         yield GenerationOutput(text="", tokens=[], finished=True)
 
+    def _request_body(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        max_tokens: int,
+        temperature: float,
+        top_p: float,
+        top_k: int,
+        min_p: float,
+        repetition_penalty: float,
+        presence_penalty: float,
+        kwargs: dict[str, Any],
+        stream: bool,
+    ) -> dict[str, Any]:
+        """The chat body Strata reads. Splash-only fields stay off it."""
+        top_k_value = top_k
+        if isinstance(top_k, int) and not isinstance(top_k, bool) and top_k > _MAX_TOP_K:
+            top_k_value = _MAX_TOP_K
+        body: dict[str, Any] = {
+            "messages": messages,
+            "stream": stream,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+            "top_k": top_k_value,
+            "min_p": min_p,
+            "repetition_penalty": repetition_penalty,
+            "presence_penalty": presence_penalty,
+        }
+        model = self._child_model_name()
+        if model:
+            body["model"] = model
+        frequency = kwargs.get("frequency_penalty")
+        if frequency is not None:
+            body["frequency_penalty"] = frequency
+        if kwargs.get("seed") is not None:
+            body["seed"] = kwargs["seed"]
+        stop = kwargs.get("stop")
+        if isinstance(stop, str) and stop:
+            body["stop"] = stop
+        elif isinstance(stop, list):
+            strings = [item for item in stop if isinstance(item, str) and item][:_MAX_STOP]
+            if strings:
+                body["stop"] = strings
+        penalty = kwargs.get("penalty_last_n", kwargs.get("repetition_context_size"))
+        if isinstance(penalty, int) and not isinstance(penalty, bool):
+            body["penalty_last_n"] = penalty
+        budget = kwargs.get("thinking_budget")
+        if isinstance(budget, int) and not isinstance(budget, bool):
+            body["thinking_budget_tokens"] = budget
+        return body
+
+    async def _post_chat(self, body: dict[str, Any]) -> dict[str, Any]:
+        if self._client is None:
+            raise InvalidRequestError("Strata engine is not started")
+        try:
+            response = await self._client.post("/v1/chat/completions", json=body)
+        except httpx.HTTPError as exc:
+            raise RuntimeError(str(exc)) from exc
+        if response.status_code != 200:
+            raise RuntimeError(f"Strata returned HTTP {response.status_code}")
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise RuntimeError("Strata chat response was not JSON") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("Strata chat response was not a JSON object")
+        return payload
+
     async def chat(
-        self, messages: list[dict[str, Any]], **kwargs: Any
+        self,
+        messages: list[dict[str, Any]],
+        max_tokens: int = 256,
+        temperature: float = 0.7,
+        top_p: float = 0.9,
+        top_k: int = 0,
+        min_p: float = 0.0,
+        repetition_penalty: float = 1.0,
+        presence_penalty: float = 0.0,
+        tools: list[dict] | None = None,
+        **kwargs: Any,
     ) -> GenerationOutput:
-        del messages, kwargs
-        self._refuse_request()
-        raise AssertionError("unreachable")
+        del tools
+        body = self._request_body(
+            messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            min_p=min_p,
+            repetition_penalty=repetition_penalty,
+            presence_penalty=presence_penalty,
+            kwargs=kwargs,
+            stream=False,
+        )
+        return _chat_output(await self._post_chat(body))
 
     async def stream_chat(
         self, messages: list[dict[str, Any]], **kwargs: Any

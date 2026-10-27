@@ -830,8 +830,10 @@ class TestDispatch:
             target=StrataTarget(StrataBinary(tmp_path / "strata", "0.2.6", True), profile),
             log_dir=tmp_path / "logs",
         )
-        with pytest.raises(InvalidRequestError, match="not implemented"):
+        with pytest.raises(InvalidRequestError, match="not started"):
             await engine.chat([{"role": "user", "content": "hi"}])
+        with pytest.raises(InvalidRequestError, match="not implemented"):
+            await engine.generate("hi")
 
     @pytest.mark.parametrize("stream", [False, True])
     def test_chat_completion_refuses_instead_of_500(
