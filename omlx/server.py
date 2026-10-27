@@ -2262,6 +2262,17 @@ def _get_ocr_defaults(model_id: str | None) -> dict | None:
     return None
 
 
+def _loaded_strata_context(entry: object) -> int | None:
+    """The context window a running Strata child reported, if it has one."""
+    engine = getattr(entry, "engine", None)
+    if getattr(engine, "external_engine_id", None) != "strata":
+        return None
+    planned = getattr(engine, "max_context_tokens", None)
+    if isinstance(planned, bool) or not isinstance(planned, int) or planned <= 0:
+        return None
+    return planned
+
+
 def _configured_max_context_window(model_id: str | None = None) -> int | None:
     """
     Get the configured max context window limit.
@@ -2274,6 +2285,10 @@ def _configured_max_context_window(model_id: str | None = None) -> int | None:
            optionally clamped by the operator policy: if
            ``sampling.max_context_window_policy`` is set, return
            ``min(native, policy)``; otherwise return ``native`` as-is.
+           A loaded Strata engine reports its own window (``/health``
+           ``max_context``, else ``/v1/models`` ``meta.n_ctx``). That
+           count is the native length: the child may have been started
+           above the GGUF ``max_position_embeddings``.
         3. **Fallback default** from ``SamplingSettings.max_context_window``
            — only used when neither tier 1 nor tier 2 yields a value.
            Treated as a default, NOT capped by the policy; existing
@@ -2300,16 +2315,24 @@ def _configured_max_context_window(model_id: str | None = None) -> int | None:
     if model_settings and model_settings.max_context_window is not None:
         return model_settings.max_context_window
 
-    # Priority 2: model-native context, optionally clamped by policy
+    # Priority 2: model-native context, optionally clamped by policy.
+    # Strata's reported window replaces the GGUF length. A larger child
+    # window would otherwise be ignored: the loaded-engine lowering below
+    # only applies when the plan is smaller than this limit.
     pool = _server_state.engine_pool
     if model_id and pool is not None:
         entry = pool.get_entry(model_id)
-        if entry is not None and entry.model_context_length is not None:
-            native = entry.model_context_length
-            policy = getattr(_server_state.sampling, "max_context_window_policy", None)
-            if policy is not None and policy > 0:
-                return min(native, policy)
-            return native
+        if entry is not None:
+            native = _loaded_strata_context(entry)
+            if native is None:
+                native = entry.model_context_length
+            if native is not None:
+                policy = getattr(
+                    _server_state.sampling, "max_context_window_policy", None
+                )
+                if policy is not None and policy > 0:
+                    return min(native, policy)
+                return native
 
     # Priority 3: fallback default (not capped — preserves legacy
     # settings.json behavior).

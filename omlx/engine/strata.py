@@ -813,6 +813,16 @@ def _as_int(value: object, default: int = 0) -> int:
     return value
 
 
+def _positive_int(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
+def _health_max_context(payload: dict[str, Any]) -> int | None:
+    return _positive_int(payload.get("max_context"))
+
+
 def _fold_message(message: dict[str, Any]) -> str:
     """Fold one assistant message the way Splash folds a streamed choice.
 
@@ -982,6 +992,7 @@ class StrataEngine(BaseEngine):
         self._log_path = log_dir / f"{slug}.log"
         self._log_offset = 0
         self._tokenizer: Any = _PlaceholderTokenizer()
+        self._max_context: int | None = None
 
     @property
     def model_name(self) -> str:
@@ -998,6 +1009,14 @@ class StrataEngine(BaseEngine):
     @property
     def log_path(self) -> Path:
         return self._log_path
+
+    @property
+    def max_context_tokens(self) -> int | None:
+        """The context window the child reported after it started."""
+        value = self._max_context
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            return None
+        return value
 
     def has_active_requests(self) -> bool:
         return False
@@ -1068,9 +1087,64 @@ class StrataEngine(BaseEngine):
             )
         try:
             await self._wait_until_ready()
+            await self._remember_context()
         except BaseException:
             await self.stop()
             raise
+
+    async def _remember_context(self) -> None:
+        """Cache ``/health`` ``max_context``, else ``/v1/models`` ``meta.n_ctx``.
+
+        A missing or unreadable window leaves the cache empty. Starting the
+        child does not depend on this read.
+        """
+        try:
+            window = await self._reported_context("/health", _health_max_context)
+            if window is None:
+                window = await self._reported_context("/v1/models", self._models_n_ctx)
+            if window is not None:
+                self._max_context = window
+        except (httpx.HTTPError, ValueError, TypeError, OSError):
+            logger.debug("Strata: context window was not reported", exc_info=True)
+
+    async def _reported_context(self, path: str, read: Any) -> int | None:
+        client = self._client
+        if client is None:
+            return None
+        try:
+            response = await client.get(path, timeout=2)
+        except httpx.HTTPError:
+            return None
+        if response.status_code != 200:
+            return None
+        try:
+            payload = response.json()
+        except ValueError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        return read(payload)
+
+    def _models_n_ctx(self, payload: dict[str, Any]) -> int | None:
+        rows = payload.get("data")
+        if not isinstance(rows, list):
+            return None
+        wanted = self._child_model_name()
+        fallback: int | None = None
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            meta = row.get("meta")
+            window = (
+                _positive_int(meta.get("n_ctx")) if isinstance(meta, dict) else None
+            )
+            if window is None:
+                continue
+            if not wanted or row.get("id") == wanted:
+                return window
+            if fallback is None:
+                fallback = window
+        return fallback
 
     async def _serves(self) -> bool:
         if self._client is None:

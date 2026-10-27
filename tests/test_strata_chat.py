@@ -429,3 +429,95 @@ class TestErrors:
         assert response.status_code == 409, response.text
         assert response.json()["error"]["message"] == "a request is running"
         assert "Internal server error" not in response.text
+
+
+def _json_response(handler: BaseHTTPRequestHandler, payload: dict) -> None:
+    body = json.dumps(payload).encode()
+    handler.send_response(200)
+    handler.send_header("Content-Type", "application/json")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
+class TestContext:
+    async def test_health_max_context_is_the_window(self, tmp_path):
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                path = self.path.split("?", 1)[0]
+                if path == "/health":
+                    payload = {
+                        "status": "ok",
+                        "max_context": 524288,
+                        "model": "qwen3.8-flash-next-iq3_s",
+                        "loaded": True,
+                    }
+                else:
+                    payload = {
+                        "data": [
+                            {
+                                "id": "qwen3.8-flash-next-iq3_s",
+                                "meta": {"n_ctx": 111},
+                            }
+                        ]
+                    }
+                _json_response(self, payload)
+
+            def log_message(self, *_args):
+                return
+
+        with _Server(Handler) as server:
+            engine = _engine(tmp_path, server.url)
+            await engine._remember_context()
+        assert engine.max_context_tokens == 524288
+
+    async def test_models_meta_supplies_the_window_without_health(self, tmp_path):
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                path = self.path.split("?", 1)[0]
+                if path == "/health":
+                    payload = {"status": "ok", "loaded": True}
+                else:
+                    payload = {
+                        "data": [
+                            {
+                                "id": "qwen3.8-flash-next-iq3_s",
+                                "meta": {"n_ctx": 524288},
+                            }
+                        ]
+                    }
+                _json_response(self, payload)
+
+            def log_message(self, *_args):
+                return
+
+        with _Server(Handler) as server:
+            engine = _engine(tmp_path, server.url)
+            await engine._remember_context()
+        assert engine.max_context_tokens == 524288
+
+    def test_the_context_check_uses_the_child_window(self, tmp_path):
+        """The GGUF config says 262144. This child was started at 524288."""
+        from omlx.server import get_max_context_window, validate_context_window
+
+        engine = _engine(tmp_path, "http://strata")
+        engine._max_context = 524288
+        entry = MagicMock()
+        entry.model_context_length = 262144
+        entry.engine = engine
+        pool = MagicMock()
+        pool.get_entry.return_value = entry
+        state = MagicMock()
+        state.engine_pool = pool
+        state.settings_manager = None
+        state.sampling.max_context_window = 32768
+        state.sampling.max_context_window_policy = None
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr("omlx.server._server_state", state)
+            patch.setattr("omlx.server.get_model_settings_for_request", lambda _name: None)
+            patch.setattr("omlx.server.resolve_model_id", lambda name: name)
+            assert get_max_context_window("flash") == 524288
+            validate_context_window(400_000, "flash")
+            with pytest.raises(HTTPException):
+                validate_context_window(524_289, "flash")
