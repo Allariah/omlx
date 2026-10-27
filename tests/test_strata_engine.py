@@ -833,6 +833,67 @@ class TestDispatch:
         with pytest.raises(InvalidRequestError, match="not implemented"):
             await engine.chat([{"role": "user", "content": "hi"}])
 
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_chat_completion_refuses_instead_of_500(
+        self, tmp_path, monkeypatch, stream
+    ):
+        """Chat dies as the not-implemented error, not a missing-method 500.
+
+        The admin page counts tokens before ``chat()``. A Strata engine
+        without that method used to raise AttributeError, which the
+        unhandled-exception middleware turned into "Internal server error".
+        """
+        from fastapi.testclient import TestClient
+
+        import omlx.server as srv
+
+        profile = tmp_path / "profile.json"
+        profile.write_text("{}")
+        engine = StrataEngine(
+            model_name=str(tmp_path),
+            model_id="flash",
+            target=StrataTarget(
+                StrataBinary(tmp_path / "strata", "0.2.6", True), profile
+            ),
+            log_dir=tmp_path / "logs",
+        )
+        pool = MagicMock()
+        pool.preload_pinned_models = AsyncMock()
+        pool.check_ttl_expirations = AsyncMock()
+        pool.shutdown = AsyncMock()
+        pool.get_entry.return_value = None
+        monkeypatch.setattr(srv._server_state, "engine_pool", pool)
+        monkeypatch.setattr(
+            srv, "get_engine_for_model", AsyncMock(return_value=engine)
+        )
+        monkeypatch.setattr(srv, "resolve_model_id", lambda name: name)
+        monkeypatch.setattr(srv, "get_model_settings_for_request", lambda name: None)
+        monkeypatch.setitem(
+            srv.app.dependency_overrides, srv.verify_inference_api_key, lambda: True
+        )
+
+        with TestClient(srv.app, raise_server_exceptions=False) as client:
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "flash",
+                    "stream": stream,
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            )
+
+        assert response.status_code == 400, response.text
+        assert response.json()["error"] == {
+            "message": (
+                "Strata cannot serve this request yet: "
+                "chat translation is not implemented"
+            ),
+            "type": "invalid_request_error",
+            "param": None,
+            "code": None,
+        }
+        assert engine._client is None
+
 
 def _group_alive(group: int) -> bool:
     try:

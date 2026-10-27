@@ -998,6 +998,16 @@ class StrataEngine(BaseEngine):
     def _refuse_request(self) -> None:
         raise InvalidRequestError(_REQUEST_UNAVAILABLE)
 
+    def count_chat_tokens(
+        self, messages, tools=None, chat_template_kwargs=None, is_partial=None
+    ) -> int:
+        # The chat route counts before chat() or stream_chat(). Counting
+        # would translate the messages, so refuse here and let those calls
+        # share this error before a stream is committed.
+        del messages, tools, chat_template_kwargs, is_partial
+        self._refuse_request()
+        raise AssertionError("unreachable")
+
     async def generate(self, prompt: str | list[int], **kwargs: Any) -> GenerationOutput:
         del prompt, kwargs
         self._refuse_request()
