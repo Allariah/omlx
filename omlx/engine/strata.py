@@ -930,13 +930,20 @@ def _memory_plan(profile: Path, model_folder: Path) -> int:
     return total + _vram_reserve_bytes(data, flags)
 
 
-def profile_max_context(model_path: str | Path) -> int | None:
-    """``--max-context`` from the run config in ``model_path``, if it has one.
+def profile_max_context(
+    model_path: str | Path, configured: str | None = None
+) -> int | None:
+    """``--max-context`` from the run config for ``model_path``.
 
-    This does not start the child and does not read a GGUF header. A
-    folder with no ``strata-*.json`` has no profile window.
+    The config in the model folder wins. When that folder has no
+    ``strata-*.json``, the install-root config that names the folder
+    is used. This does not start the child and does not read a GGUF
+    header.
     """
-    config = _run_config(Path(model_path))
+    folder = Path(model_path)
+    config = _run_config(folder)
+    if config is None:
+        config = _matching_install_config(folder, configured)
     if config is None:
         return None
     raw = _flag_values((_read_json(config) or {}).get("args")).get("--max-context")
@@ -954,11 +961,14 @@ def strata_advertised_context(
     *,
     model_format: object,
     external_engine: object,
+    configured: str | None = None,
 ) -> int | None:
     """The profile window when Strata is the engine for this folder.
 
     An explicit Splash selection keeps the caller's discovered length.
-    A plain GGUF with no run config returns None.
+    A plain GGUF with no run config returns None. ``configured`` is the
+    launcher path, so a pack whose ``strata-*.json`` lives at the install
+    root can still be found.
     """
     if external_engine not in (None, "", "strata"):
         return None
@@ -966,7 +976,7 @@ def strata_advertised_context(
         return None
     if not isinstance(model_path, (str, os.PathLike)):
         return None
-    return profile_max_context(model_path)
+    return profile_max_context(model_path, configured)
 
 
 def _health_max_context(payload: dict[str, Any]) -> int | None:

@@ -2382,12 +2382,29 @@ def _model_dirs_for_display(global_settings: Any | None) -> list[Path]:
         return []
 
 
+def _configured_strata_path() -> str | None:
+    """``integrations.strata_path`` when settings are loaded, else None."""
+    getter = _get_global_settings
+    if not callable(getter):
+        return None
+    try:
+        settings = getter()
+    except (RuntimeError, AttributeError, TypeError):
+        return None
+    integrations = getattr(settings, "integrations", None)
+    path = getattr(integrations, "strata_path", None)
+    if isinstance(path, str) and path.strip():
+        return path
+    return None
+
+
 def _listed_context_length(model_info: dict, settings: object | None) -> int | None:
     """The context length the admin model list should show.
 
     A Strata pack's run config starts a larger window than the GGUF
     ``max_position_embeddings``. Show that window while the model is
-    unloaded. Other models keep the length discovery recorded.
+    unloaded. The profile may live at the install root. Other models
+    keep the length discovery recorded.
     """
     discovered = model_info.get("model_context_length")
     window = strata_advertised_context(
@@ -2396,6 +2413,7 @@ def _listed_context_length(model_info: dict, settings: object | None) -> int | N
         external_engine=(
             getattr(settings, "external_engine", None) if settings is not None else None
         ),
+        configured=_configured_strata_path(),
     )
     return discovered if window is None else window
 

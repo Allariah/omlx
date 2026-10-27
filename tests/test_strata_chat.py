@@ -905,6 +905,147 @@ class TestContext:
             == 262144
         )
 
+    def test_install_root_profile_advertises_its_window(self, tmp_path, monkeypatch):
+        """No strata-*.json in the folder. The install root still names 524288."""
+        from types import SimpleNamespace
+
+        from omlx.admin.routes import _listed_context_length
+        from omlx.server import get_max_context_window
+
+        model = tmp_path / "model"
+        model.mkdir()
+        shard = model / "model.gguf"
+        shard.write_bytes(b"not-a-gguf-header")
+        install = tmp_path / "install"
+        install.mkdir()
+        launcher = install / "strata"
+        launcher.write_bytes(b"")
+        (install / "strata-iq3_s.json").write_text(
+            json.dumps(
+                {
+                    "exe": "component:strata-engine",
+                    "tokenizer": "tokenizer",
+                    "args": [
+                        "--max-context",
+                        "524288",
+                        "--ple-gguf",
+                        str(shard),
+                    ],
+                }
+            )
+        )
+        seen: list[str | None] = []
+
+        def roots(configured: str | None) -> list:
+            seen.append(configured)
+            return [install]
+
+        def no_gguf(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("GGUF header was read")
+
+        monkeypatch.setattr("omlx.engine.strata._install_roots", roots)
+        monkeypatch.setattr("omlx.engine.strata._gguf_tensor_names", no_gguf)
+        entry = MagicMock()
+        entry.model_context_length = 262144
+        entry.model_format = "gguf"
+        entry.model_path = str(model)
+        entry.engine = None
+        pool = MagicMock()
+        pool.get_entry.return_value = entry
+        state = MagicMock()
+        state.engine_pool = pool
+        state.settings_manager = None
+        state.sampling.max_context_window = 32768
+        state.sampling.max_context_window_policy = None
+        state.global_settings = SimpleNamespace(
+            integrations=SimpleNamespace(strata_path=str(launcher))
+        )
+        settings = MagicMock()
+        settings.external_engine = None
+        settings.max_context_window = None
+        info = {
+            "model_path": str(model),
+            "model_format": "gguf",
+            "model_context_length": 262144,
+        }
+        monkeypatch.setattr("omlx.server._server_state", state)
+        monkeypatch.setattr(
+            "omlx.server.get_model_settings_for_request", lambda _name: settings
+        )
+        monkeypatch.setattr("omlx.server.resolve_model_id", lambda name: name)
+        monkeypatch.setattr(
+            "omlx.admin.routes._get_global_settings",
+            lambda: state.global_settings,
+        )
+
+        assert get_max_context_window("flash") == 524288
+        assert _listed_context_length(info, settings) == 524288
+        assert seen == [str(launcher), str(launcher)]
+
+        settings.external_engine = "splash"
+        assert get_max_context_window("flash") == 262144
+        assert _listed_context_length(info, settings) == 262144
+        assert seen == [str(launcher), str(launcher)]
+
+    def test_an_in_folder_config_wins_over_the_install_root(
+        self, tmp_path, monkeypatch
+    ):
+        from omlx.server import get_max_context_window
+
+        model = tmp_path / "model"
+        model.mkdir()
+        (model / "strata-flash.json").write_text(
+            json.dumps(
+                {
+                    "exe": "component:strata-engine",
+                    "tokenizer": "tokenizer",
+                    "args": ["--max-context", "111111"],
+                }
+            )
+        )
+        install = tmp_path / "install"
+        install.mkdir()
+        (install / "strata-iq3_s.json").write_text(
+            json.dumps(
+                {
+                    "exe": "component:strata-engine",
+                    "tokenizer": "tokenizer",
+                    "args": ["--max-context", "524288", "--model", str(model)],
+                }
+            )
+        )
+        seen: list[str | None] = []
+
+        def roots(configured: str | None) -> list:
+            seen.append(configured)
+            return [install]
+
+        monkeypatch.setattr("omlx.engine.strata._install_roots", roots)
+        entry = MagicMock()
+        entry.model_context_length = 262144
+        entry.model_format = "gguf"
+        entry.model_path = str(model)
+        entry.engine = None
+        pool = MagicMock()
+        pool.get_entry.return_value = entry
+        state = MagicMock()
+        state.engine_pool = pool
+        state.settings_manager = None
+        state.sampling.max_context_window = 32768
+        state.sampling.max_context_window_policy = None
+        state.global_settings = None
+        settings = MagicMock()
+        settings.external_engine = None
+        settings.max_context_window = None
+        monkeypatch.setattr("omlx.server._server_state", state)
+        monkeypatch.setattr(
+            "omlx.server.get_model_settings_for_request", lambda _name: settings
+        )
+        monkeypatch.setattr("omlx.server.resolve_model_id", lambda name: name)
+
+        assert get_max_context_window("flash") == 111111
+        assert seen == []
+
     def test_a_per_model_override_still_wins(self, tmp_path):
         get_max_context_window, state, settings, _model = self._unloaded(
             tmp_path, engine_id="strata", override=8192

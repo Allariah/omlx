@@ -2273,13 +2273,24 @@ def _loaded_strata_context(entry: object) -> int | None:
     return planned
 
 
+def _configured_strata_path() -> str | None:
+    """``integrations.strata_path`` when settings are loaded, else None."""
+    settings = getattr(_server_state, "global_settings", None)
+    integrations = getattr(settings, "integrations", None)
+    path = getattr(integrations, "strata_path", None)
+    if isinstance(path, str) and path.strip():
+        return path
+    return None
+
+
 def _unloaded_strata_context(
     entry: object, model_settings: object | None
 ) -> int | None:
     """``--max-context`` from the run config while the child is not loaded.
 
     The GGUF length for this pack is smaller than the window the profile
-    starts. A loaded child still wins. Splash keeps the GGUF length.
+    starts. The profile may live at the install root. A loaded child
+    still wins. Splash keeps the GGUF length.
     """
     from .engine.strata import strata_advertised_context
 
@@ -2290,6 +2301,7 @@ def _unloaded_strata_context(
         getattr(entry, "model_path", None),
         model_format=getattr(entry, "model_format", None),
         external_engine=engine_id,
+        configured=_configured_strata_path(),
     )
 
 
